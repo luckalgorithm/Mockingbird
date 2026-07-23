@@ -5,13 +5,11 @@
 namespace Mockingbird {
 
 std::string square_name(Square square) {
-    // A single sentinel spelling is easier for diagnostic output than trying
-    // to assign coordinates to padding and corner cut-outs.
+    // Invalid and non-playable squares use the sentinel spelling "-".
     if (!is_ok(square))
         return "-";
 
-    // Files are stored as 1..14, so FILE_A must be removed before adding the
-    // zero-based offset to the character 'a'.
+    // File values 1..14 map to characters 'a'..'n'.
     std::string name;
     name += char('a' + file_of(square) - FILE_A);
     name += std::to_string(rank_of(square));
@@ -19,7 +17,7 @@ std::string square_name(Square square) {
 }
 
 std::optional<Square> parse_square(std::string_view name) {
-    // Legal names range from two characters ("d1") to three ("k14").
+    // Coordinate names contain one file character and a one- or two-digit rank.
     if (name.size() < 2 || name.size() > 3)
         return std::nullopt;
 
@@ -30,8 +28,7 @@ std::optional<Square> parse_square(std::string_view name) {
     if (file_character < 'a' || file_character > 'n')
         return std::nullopt;
 
-    // Ranks contain at most two digits, so this small allocation-free parser is
-    // straightforward and rejects signs, whitespace, and trailing characters.
+    // The loop accepts decimal digits only.
     int rank = 0;
     for (const char character : name.substr(1)) {
         if (character < '0' || character > '9')
@@ -45,8 +42,7 @@ std::optional<Square> parse_square(std::string_view name) {
     const File file = File(file_character - 'a' + FILE_A);
     const Square square = make_square(file, Rank(rank));
 
-    // A syntactically valid coordinate such as "a1" may still refer to one of
-    // the four cut-out corners. Only playable squares are accepted.
+    // Coordinates in the four cut-out corners are not playable.
     return is_ok(square) ? std::optional(square) : std::nullopt;
 }
 

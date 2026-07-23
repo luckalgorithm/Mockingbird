@@ -8,10 +8,7 @@ namespace Mockingbird {
 // Players and teams
 // -----------------------------------------------------------------------------
 
-// Colors are deliberately numbered in turn order. Incrementing a color modulo
-// COLOR_NB therefore advances the game from Red -> Blue -> Yellow -> Green.
-// Keeping this relationship in the encoding will simplify the future turn
-// manager and search code.
+// Numeric order matches turn order: Red -> Blue -> Yellow -> Green -> Red.
 enum Color : int {
     RED,
     BLUE,
@@ -50,8 +47,7 @@ enum Team : int {
 // Pieces
 // -----------------------------------------------------------------------------
 
-// Zero is reserved for "no piece." Real piece types occupy values 1 through 6,
-// which lets an empty square be represented by an all-zero initialized value.
+// NO_PIECE_TYPE is 0. Real piece types occupy values 1 through 6.
 enum PieceType : int {
     NO_PIECE_TYPE,
     PAWN,
@@ -68,9 +64,8 @@ enum PieceType : int {
 //     bits 0..2: PieceType (three bits)
 //     bits 3..4: Color     (two bits)
 //
-// For example, make_piece(BLUE, ROOK) is (1 << 3) | 4 == 12. This encoding
-// makes type_of() and color_of() cheap masks/shifts in frequently executed
-// engine code. Values 7, 8, 15, 16, 23, and 24 are intentionally unused.
+// For example, make_piece(BLUE, ROOK) is (1 << 3) | 4 == 12.
+// Values 7, 8, 15, 16, 23, and 24 are unused.
 enum Piece : int {
     NO_PIECE,
 
@@ -137,14 +132,13 @@ enum Piece : int {
 // Board geometry
 // -----------------------------------------------------------------------------
 
-// Four-player chess uses a 14x14 cross with a 3x3 square removed from each corner.
-// We embed that board inside a 16x16 "mailbox." Files 0 and 15 and ranks 0
-// and 15 are padding. A square is encoded as:
+// The board is a 14x14 cross with a 3x3 square removed from each corner.
+// It is stored in a 16x16 mailbox. Files 0 and 15 and ranks 0 and 15 are
+// padding. A square is encoded as:
 //
 //     square = rank * 16 + file
 //
-// The power-of-two width means the file is the low four bits and the rank is
-// the remaining high bits. It also makes North/South constant +/-16 offsets.
+// The file occupies the low four bits. The rank occupies the high four bits.
 inline constexpr int BOARD_FILES = 14;
 inline constexpr int BOARD_RANKS = 14;
 inline constexpr int PLAYABLE_SQUARE_NB = 160;
@@ -224,11 +218,10 @@ enum Direction : int {
     return Square((rank << 4) | file);
 }
 
-// True for every coordinate in the complete 14x14 grid, including the four
-// cut-out 3x3 corners. This is useful when testing the mailbox itself.
+// Returns true for coordinates in the complete 14x14 grid, including the four
+// cut-out 3x3 corners.
 [[nodiscard]] constexpr bool is_board_coordinate(Square square) noexcept {
-    // The unsigned conversion rejects both negative values and SQ_NONE with
-    // one comparison before file_of() or rank_of() can inspect the value.
+    // Conversion to unsigned maps negative values outside the 0..255 range.
     if (static_cast<unsigned>(square) >= SQUARE_NB)
         return false;
 
@@ -251,8 +244,7 @@ enum Direction : int {
     return !corner_rank || (file >= FILE_D && file <= FILE_K);
 }
 
-// These operators move within the mailbox; callers must use is_ok() when the
-// destination is not already known to be playable.
+// These operators apply a mailbox offset. They do not validate the result.
 [[nodiscard]] constexpr Square operator+(Square square, Direction direction) noexcept {
     return Square(int(square) + int(direction));
 }
@@ -261,7 +253,7 @@ enum Direction : int {
     return Square(int(square) - int(direction));
 }
 
-// Pawns advance toward the center from four different sides of the board.
+// Pawn directions are Red: North, Blue: East, Yellow: South, Green: West.
 [[nodiscard]] constexpr Direction pawn_push(Color color) noexcept {
     return color == RED    ? NORTH
          : color == BLUE   ? EAST
