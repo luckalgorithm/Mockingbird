@@ -1,5 +1,6 @@
 #include "movegen.h"
 
+#include <array>
 #include <cstdlib>
 #include <iostream>
 #include <string_view>
@@ -32,6 +33,21 @@ void expect(bool condition, std::string_view message) {
 
 static_assert(constexpr_move_list_operations());
 
+[[nodiscard]] constexpr bool constexpr_slider_generation() {
+    using namespace Mockingbird;
+
+    constexpr Square d1 = make_square(FILE_D, RANK_1);
+
+    Position position;
+    position.put_piece(R_ROOK, d1);
+
+    MoveList moves;
+    generate_rook_moves(position, moves);
+    return moves.size() == 20;
+}
+
+static_assert(constexpr_slider_generation());
+
 [[nodiscard]] Mockingbird::Bitboard destinations_from(
   const Mockingbird::MoveList& moves, Mockingbird::Square source) {
     using namespace Mockingbird;
@@ -46,7 +62,7 @@ static_assert(constexpr_move_list_operations());
     return destinations;
 }
 
-[[nodiscard]] bool matches_single_knight(
+[[nodiscard]] bool matches_single_source(
   const Mockingbird::MoveList& moves,
   Mockingbird::Square source,
   const Mockingbird::Bitboard& expected_destinations) {
@@ -66,6 +82,40 @@ static_assert(constexpr_move_list_operations());
     }
 
     return actual_destinations == expected_destinations;
+}
+
+constexpr std::array<Mockingbird::PieceType, 3> SLIDER_TYPES = {
+  Mockingbird::BISHOP,
+  Mockingbird::ROOK,
+  Mockingbird::QUEEN,
+};
+
+[[nodiscard]] Mockingbird::Bitboard slider_attacks(
+  Mockingbird::PieceType piece_type,
+  Mockingbird::Square source,
+  const Mockingbird::Bitboard& occupied) {
+    using namespace Mockingbird;
+
+    if (piece_type == BISHOP)
+        return bishop_attacks(source, occupied);
+    if (piece_type == ROOK)
+        return rook_attacks(source, occupied);
+
+    return queen_attacks(source, occupied);
+}
+
+void generate_slider_moves(
+  Mockingbird::PieceType piece_type,
+  const Mockingbird::Position& position,
+  Mockingbird::MoveList& moves) {
+    using namespace Mockingbird;
+
+    if (piece_type == BISHOP)
+        generate_bishop_moves(position, moves);
+    else if (piece_type == ROOK)
+        generate_rook_moves(position, moves);
+    else
+        generate_queen_moves(position, moves);
 }
 
 void test_move_list() {
@@ -218,8 +268,211 @@ void test_every_single_blocker() {
                     MoveList moves;
                     generate_knight_moves(position, moves);
 
-                    expect(matches_single_knight(moves, source, expected),
+                    expect(matches_single_source(moves, source, expected),
                            "knight moves match every single-blocker position");
+                }
+            }
+        }
+    }
+}
+
+void test_empty_and_inactive_sliders() {
+    using namespace Mockingbird;
+
+    constexpr Square d1 = make_square(FILE_D, RANK_1);
+    constexpr Square h8 = make_square(FILE_H, RANK_8);
+    constexpr Square n4 = make_square(FILE_N, RANK_4);
+
+    Position position;
+    MoveList moves;
+    generate_sliding_moves(position, moves);
+    expect(moves.empty(), "an empty position has no sliding moves");
+
+    position.put_piece(Y_BISHOP, d1);
+    position.put_piece(B_ROOK, h8);
+    position.put_piece(G_QUEEN, n4);
+    generate_sliding_moves(position, moves);
+    expect(moves.empty(), "inactive sliders do not move on Red's turn");
+}
+
+void test_known_rook_blockers() {
+    using namespace Mockingbird;
+
+    constexpr Square h8 = make_square(FILE_H, RANK_8);
+    constexpr Square h10 = make_square(FILE_H, RANK_10);
+    constexpr Square h11 = make_square(FILE_H, RANK_11);
+    constexpr Square f8 = make_square(FILE_F, RANK_8);
+    constexpr Square e8 = make_square(FILE_E, RANK_8);
+    constexpr Square h6 = make_square(FILE_H, RANK_6);
+    constexpr Square h5 = make_square(FILE_H, RANK_5);
+    constexpr Square j8 = make_square(FILE_J, RANK_8);
+    constexpr Square k8 = make_square(FILE_K, RANK_8);
+
+    Position position;
+    position.put_piece(R_ROOK, h8);
+    position.put_piece(R_PAWN, h10);
+    position.put_piece(Y_PAWN, f8);
+    position.put_piece(B_PAWN, h6);
+    position.put_piece(G_PAWN, j8);
+
+    MoveList moves;
+    generate_rook_moves(position, moves);
+
+    const Bitboard destinations = destinations_from(moves, h8);
+    expect(!destinations.test(h10), "own piece is excluded from a rook ray");
+    expect(!destinations.test(h11), "own piece hides later rook destinations");
+    expect(!destinations.test(f8), "teammate piece is excluded from a rook ray");
+    expect(!destinations.test(e8), "teammate piece hides later rook destinations");
+    expect(destinations.test(h6), "Blue piece is a capturable rook destination");
+    expect(!destinations.test(h5), "Blue piece hides later rook destinations");
+    expect(destinations.test(j8), "Green piece is a capturable rook destination");
+    expect(!destinations.test(k8), "Green piece hides later rook destinations");
+}
+
+void test_known_bishop_blockers() {
+    using namespace Mockingbird;
+
+    constexpr Square h8 = make_square(FILE_H, RANK_8);
+    constexpr Square j10 = make_square(FILE_J, RANK_10);
+    constexpr Square k11 = make_square(FILE_K, RANK_11);
+    constexpr Square f10 = make_square(FILE_F, RANK_10);
+    constexpr Square e11 = make_square(FILE_E, RANK_11);
+    constexpr Square j6 = make_square(FILE_J, RANK_6);
+    constexpr Square k5 = make_square(FILE_K, RANK_5);
+    constexpr Square f6 = make_square(FILE_F, RANK_6);
+    constexpr Square e5 = make_square(FILE_E, RANK_5);
+
+    Position position;
+    position.put_piece(R_BISHOP, h8);
+    position.put_piece(R_PAWN, j10);
+    position.put_piece(Y_PAWN, f10);
+    position.put_piece(B_PAWN, j6);
+    position.put_piece(G_PAWN, f6);
+
+    MoveList moves;
+    generate_bishop_moves(position, moves);
+
+    const Bitboard destinations = destinations_from(moves, h8);
+    expect(!destinations.test(j10), "own piece is excluded from a bishop ray");
+    expect(!destinations.test(k11), "own piece hides later bishop destinations");
+    expect(!destinations.test(f10), "teammate piece is excluded from a bishop ray");
+    expect(!destinations.test(e11), "teammate piece hides later bishop destinations");
+    expect(destinations.test(j6), "Blue piece is a capturable bishop destination");
+    expect(!destinations.test(k5), "Blue piece hides later bishop destinations");
+    expect(destinations.test(f6), "Green piece is a capturable bishop destination");
+    expect(!destinations.test(e5), "Green piece hides later bishop destinations");
+}
+
+void test_queen_combines_rook_and_bishop_moves() {
+    using namespace Mockingbird;
+
+    constexpr Square h8 = make_square(FILE_H, RANK_8);
+
+    Position position;
+    position.put_piece(R_QUEEN, h8);
+    position.put_piece(R_PAWN, make_square(FILE_H, RANK_10));
+    position.put_piece(Y_PAWN, make_square(FILE_F, RANK_10));
+    position.put_piece(B_PAWN, make_square(FILE_H, RANK_6));
+    position.put_piece(G_PAWN, make_square(FILE_J, RANK_6));
+
+    MoveList moves;
+    generate_queen_moves(position, moves);
+
+    const Bitboard expected =
+      queen_attacks(h8, position.occupied()) & ~position.pieces(RED_YELLOW);
+    expect(matches_single_source(moves, h8, expected),
+           "queen generation combines blocked rook and bishop rays");
+}
+
+void test_multiple_sliders_and_append_behavior() {
+    using namespace Mockingbird;
+
+    constexpr Square d1 = make_square(FILE_D, RANK_1);
+    constexpr Square h8 = make_square(FILE_H, RANK_8);
+    constexpr Square n4 = make_square(FILE_N, RANK_4);
+    constexpr Square d14 = make_square(FILE_D, RANK_14);
+    constexpr Square e1 = make_square(FILE_E, RANK_1);
+
+    Position position;
+    position.put_piece(R_BISHOP, d1);
+    position.put_piece(R_ROOK, h8);
+    position.put_piece(R_QUEEN, n4);
+    position.put_piece(Y_QUEEN, d14);
+
+    MoveList moves;
+    const Move existing = Move::normal(d1, e1);
+    moves.push_back(existing);
+    generate_sliding_moves(position, moves);
+    expect(moves[0] == existing, "sliding generation appends to an existing move list");
+
+    MoveList generated;
+    generate_sliding_moves(position, generated);
+
+    const Bitboard friendly = position.pieces(RED_YELLOW);
+    const Bitboard bishop =
+      bishop_attacks(d1, position.occupied()) & ~friendly;
+    const Bitboard rook =
+      rook_attacks(h8, position.occupied()) & ~friendly;
+    const Bitboard queen =
+      queen_attacks(n4, position.occupied()) & ~friendly;
+
+    expect(destinations_from(generated, d1) == bishop,
+           "active bishop contributes its blocked destinations");
+    expect(destinations_from(generated, h8) == rook,
+           "active rook contributes its blocked destinations");
+    expect(destinations_from(generated, n4) == queen,
+           "active queen contributes its blocked destinations");
+    expect(destinations_from(generated, d14).empty(),
+           "teammate queen contributes no moves");
+    expect(generated.size()
+             == static_cast<std::size_t>(
+               bishop.popcount() + rook.popcount() + queen.popcount()),
+           "combined slider size equals each active piece's destinations");
+}
+
+void test_every_single_slider_blocker() {
+    using namespace Mockingbird;
+
+    // For every slider type, player, and source, places each color on every
+    // other playable square.
+    for (const PieceType piece_type : SLIDER_TYPES) {
+        for (int moving_color_index = 0; moving_color_index < COLOR_NB;
+             ++moving_color_index) {
+            const Color moving_color = Color(moving_color_index);
+
+            for (int source_index = 0; source_index < SQUARE_NB; ++source_index) {
+                const Square source = Square(source_index);
+                if (!is_ok(source))
+                    continue;
+
+                for (int blocker_index = 0; blocker_index < SQUARE_NB;
+                     ++blocker_index) {
+                    const Square blocker = Square(blocker_index);
+                    if (!is_ok(blocker) || blocker == source)
+                        continue;
+
+                    for (int blocker_color_index = 0;
+                         blocker_color_index < COLOR_NB;
+                         ++blocker_color_index) {
+                        const Color blocker_color = Color(blocker_color_index);
+
+                        Position position;
+                        position.set_side_to_move(moving_color);
+                        position.put_piece(
+                          make_piece(moving_color, piece_type), source);
+                        position.put_piece(
+                          make_piece(blocker_color, PAWN), blocker);
+
+                        const Bitboard expected =
+                          slider_attacks(piece_type, source, position.occupied())
+                          & ~position.pieces(team_of(moving_color));
+
+                        MoveList moves;
+                        generate_slider_moves(piece_type, position, moves);
+
+                        expect(matches_single_source(moves, source, expected),
+                               "slider moves match every single-blocker position");
+                    }
                 }
             }
         }
@@ -234,6 +487,12 @@ int main() {
     test_known_friendly_and_enemy_destinations();
     test_multiple_active_knights_and_append_behavior();
     test_every_single_blocker();
+    test_empty_and_inactive_sliders();
+    test_known_rook_blockers();
+    test_known_bishop_blockers();
+    test_queen_combines_rook_and_bishop_moves();
+    test_multiple_sliders_and_append_behavior();
+    test_every_single_slider_blocker();
 
     if (failures != 0) {
         std::cerr << failures << " move-generation test(s) failed\n";
