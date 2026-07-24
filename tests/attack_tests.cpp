@@ -1,5 +1,8 @@
 #include "attacks.h"
 
+#include <array>
+#include <cstddef>
+#include <cstdint>
 #include <cstdlib>
 #include <iostream>
 #include <string_view>
@@ -15,6 +18,84 @@ void expect(bool condition, std::string_view message) {
 
     std::cerr << "FAIL: " << message << '\n';
     ++failures;
+}
+
+struct RayCase {
+    Mockingbird::RayDirection direction;
+    int file_step;
+    int rank_step;
+};
+
+// Coordinate steps provide an implementation-independent definition of each
+// ray direction.
+constexpr std::array<RayCase, Mockingbird::RAY_DIRECTION_NB> RAY_CASES = {{
+  {Mockingbird::RayDirection::NORTH, 0, 1},
+  {Mockingbird::RayDirection::NORTH_EAST, 1, 1},
+  {Mockingbird::RayDirection::EAST, 1, 0},
+  {Mockingbird::RayDirection::SOUTH_EAST, 1, -1},
+  {Mockingbird::RayDirection::SOUTH, 0, -1},
+  {Mockingbird::RayDirection::SOUTH_WEST, -1, -1},
+  {Mockingbird::RayDirection::WEST, -1, 0},
+  {Mockingbird::RayDirection::NORTH_WEST, -1, 1},
+}};
+
+constexpr std::array<std::size_t, 4> ROOK_RAY_INDICES = {0, 2, 4, 6};
+constexpr std::array<std::size_t, 4> BISHOP_RAY_INDICES = {1, 3, 5, 7};
+
+[[nodiscard]] Mockingbird::Bitboard reference_ray_attacks(
+  Mockingbird::Square source, const RayCase& ray, const Mockingbird::Bitboard& occupied) {
+    using namespace Mockingbird;
+
+    Bitboard attacks;
+    if (!is_ok(source))
+        return attacks;
+
+    int file = file_of(source) + ray.file_step;
+    int rank = rank_of(source) + ray.rank_step;
+
+    while (file >= FILE_A && file <= FILE_N && rank >= RANK_1 && rank <= RANK_14) {
+        const Square destination = make_square(File(file), Rank(rank));
+        if (!is_ok(destination))
+            break;
+
+        attacks.set(destination);
+        if (occupied.test(destination))
+            break;
+
+        file += ray.file_step;
+        rank += ray.rank_step;
+    }
+
+    return attacks;
+}
+
+template<std::size_t RayCount>
+[[nodiscard]] Mockingbird::Bitboard reference_sliding_attacks(
+  Mockingbird::Square source,
+  const Mockingbird::Bitboard& occupied,
+  const std::array<std::size_t, RayCount>& ray_indices) {
+    Mockingbird::Bitboard attacks;
+
+    for (const std::size_t index : ray_indices)
+        attacks |= reference_ray_attacks(source, RAY_CASES[index], occupied);
+
+    return attacks;
+}
+
+[[nodiscard]] Mockingbird::Bitboard reference_rook_attacks(
+  Mockingbird::Square source, const Mockingbird::Bitboard& occupied) {
+    return reference_sliding_attacks(source, occupied, ROOK_RAY_INDICES);
+}
+
+[[nodiscard]] Mockingbird::Bitboard reference_bishop_attacks(
+  Mockingbird::Square source, const Mockingbird::Bitboard& occupied) {
+    return reference_sliding_attacks(source, occupied, BISHOP_RAY_INDICES);
+}
+
+[[nodiscard]] Mockingbird::Bitboard reference_queen_attacks(
+  Mockingbird::Square source, const Mockingbird::Bitboard& occupied) {
+    return reference_rook_attacks(source, occupied)
+         | reference_bishop_attacks(source, occupied);
 }
 
 void test_known_king_attacks() {
@@ -113,6 +194,53 @@ void test_known_pawn_attacks() {
            "red pawn on d1 does not attack cut-out square c2");
 }
 
+void test_known_sliding_attacks() {
+    using namespace Mockingbird;
+
+    constexpr Square h8 = make_square(FILE_H, RANK_8);
+    constexpr Square d1 = make_square(FILE_D, RANK_1);
+    constexpr Square a4 = make_square(FILE_A, RANK_4);
+
+    static_assert(rook_attacks(h8).popcount() == 26);
+    static_assert(bishop_attacks(h8).popcount() == 15);
+    static_assert(queen_attacks(h8).popcount() == 41);
+    static_assert(rook_attacks(d1).popcount() == 20);
+    static_assert(bishop_attacks(d1).popcount() == 10);
+    static_assert(queen_attacks(d1).popcount() == 30);
+
+    expect(!rook_attacks(d1).test(make_square(FILE_C, RANK_1)),
+           "rook ray stops at the lower-left cut-out corner");
+    expect(!rook_attacks(d1).test(make_square(FILE_L, RANK_1)),
+           "rook ray stops at the lower-right cut-out corner");
+    expect(!bishop_attacks(a4).test(make_square(FILE_B, RANK_3)),
+           "bishop ray stops at the lower-left cut-out corner");
+
+    Bitboard occupied;
+    occupied.set(make_square(FILE_H, RANK_10));
+    occupied.set(make_square(FILE_H, RANK_12));
+    occupied.set(make_square(FILE_F, RANK_8));
+    occupied.set(make_square(FILE_D, RANK_8));
+    occupied.set(make_square(FILE_J, RANK_10));
+    occupied.set(make_square(FILE_L, RANK_12));
+
+    const Bitboard rook = rook_attacks(h8, occupied);
+    expect(rook.test(make_square(FILE_H, RANK_10)), "rook attacks its north blocker");
+    expect(!rook.test(make_square(FILE_H, RANK_11)),
+           "north blocker hides squares behind it");
+    expect(rook.test(make_square(FILE_F, RANK_8)), "rook attacks its west blocker");
+    expect(!rook.test(make_square(FILE_E, RANK_8)),
+           "west blocker hides squares behind it");
+
+    const Bitboard bishop = bishop_attacks(h8, occupied);
+    expect(bishop.test(make_square(FILE_J, RANK_10)),
+           "bishop attacks its north-east blocker");
+    expect(!bishop.test(make_square(FILE_K, RANK_11)),
+           "diagonal blocker hides squares behind it");
+
+    expect(queen_attacks(h8, occupied) == (rook | bishop),
+           "queen attacks combine blocked rook and bishop rays");
+}
+
 void test_all_attack_tables() {
     using namespace Mockingbird;
 
@@ -209,6 +337,102 @@ void test_geometric_equivalence() {
     }
 }
 
+void test_all_ray_tables() {
+    using namespace Mockingbird;
+
+    const Bitboard occupied;
+
+    // Every source and direction is compared with coordinate stepping. This
+    // includes the complete boundary of all four cut-out corners.
+    for (int source_index = 0; source_index < SQUARE_NB; ++source_index) {
+        const Square source = Square(source_index);
+
+        for (const RayCase& ray : RAY_CASES) {
+            expect(ray_attacks(ray.direction, source)
+                     == reference_ray_attacks(source, ray, occupied),
+                   "ray table matches coordinate stepping");
+        }
+
+        expect(rook_attacks(source) == reference_rook_attacks(source, occupied),
+               "empty-board rook attacks match coordinate stepping");
+        expect(bishop_attacks(source) == reference_bishop_attacks(source, occupied),
+               "empty-board bishop attacks match coordinate stepping");
+        expect(queen_attacks(source) == reference_queen_attacks(source, occupied),
+               "empty-board queen attacks match coordinate stepping");
+    }
+}
+
+void test_all_directional_blocker_subsets() {
+    using namespace Mockingbird;
+
+    // A ray can contain at most thirteen destinations on the 14x14 board.
+    std::array<Square, BOARD_FILES - 1> destinations{};
+
+    for (int source_index = 0; source_index < SQUARE_NB; ++source_index) {
+        const Square source = Square(source_index);
+
+        for (const RayCase& ray : RAY_CASES) {
+            std::size_t destination_count = 0;
+
+            if (is_ok(source)) {
+                int file = file_of(source) + ray.file_step;
+                int rank = rank_of(source) + ray.rank_step;
+
+                while (file >= FILE_A && file <= FILE_N && rank >= RANK_1
+                       && rank <= RANK_14) {
+                    const Square destination = make_square(File(file), Rank(rank));
+                    if (!is_ok(destination))
+                        break;
+
+                    destinations[destination_count++] = destination;
+                    file += ray.file_step;
+                    rank += ray.rank_step;
+                }
+            }
+
+            // Enumerates all 2^n occupancy subsets for this directional ray.
+            const std::uint32_t subset_count = std::uint32_t{1} << destination_count;
+            for (std::uint32_t subset = 0; subset < subset_count; ++subset) {
+                Bitboard occupied;
+
+                for (std::size_t index = 0; index < destination_count; ++index) {
+                    if ((subset & (std::uint32_t{1} << index)) != 0)
+                        occupied.set(destinations[index]);
+                }
+
+                expect(ray_attacks(ray.direction, source, occupied)
+                         == reference_ray_attacks(source, ray, occupied),
+                       "blocked ray matches coordinate stepping");
+            }
+        }
+    }
+}
+
+void test_all_single_blockers() {
+    using namespace Mockingbird;
+
+    // Tests every mailbox source against a blocker on every mailbox index.
+    // Padding and cut-out blocker bits must not affect a playable ray.
+    for (int source_index = 0; source_index < SQUARE_NB; ++source_index) {
+        const Square source = Square(source_index);
+
+        for (int blocker_index = 0; blocker_index < SQUARE_NB; ++blocker_index) {
+            Bitboard occupied;
+            occupied.set(Square(blocker_index));
+
+            expect(rook_attacks(source, occupied)
+                     == reference_rook_attacks(source, occupied),
+                   "rook attacks match every single-blocker position");
+            expect(bishop_attacks(source, occupied)
+                     == reference_bishop_attacks(source, occupied),
+                   "bishop attacks match every single-blocker position");
+            expect(queen_attacks(source, occupied)
+                     == reference_queen_attacks(source, occupied),
+                   "queen attacks match every single-blocker position");
+        }
+    }
+}
+
 void test_pawn_geometric_equivalence() {
     using namespace Mockingbird;
 
@@ -250,9 +474,13 @@ int main() {
     test_known_king_attacks();
     test_known_knight_attacks();
     test_known_pawn_attacks();
+    test_known_sliding_attacks();
     test_all_attack_tables();
     test_all_pawn_attack_tables();
     test_geometric_equivalence();
+    test_all_ray_tables();
+    test_all_directional_blocker_subsets();
+    test_all_single_blockers();
     test_pawn_geometric_equivalence();
 
     if (failures != 0) {

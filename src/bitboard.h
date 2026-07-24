@@ -78,6 +78,21 @@ class Bitboard {
         return SQ_NONE;
     }
 
+    // Precondition: the bitboard is not empty.
+    [[nodiscard]] constexpr Square msb() const noexcept {
+        assert(!empty());
+
+        for (std::size_t index = LIMB_NB; index-- > 0;) {
+            if (limbs_[index] != 0) {
+                const int bit =
+                  static_cast<int>(BITS_PER_LIMB) - 1 - std::countl_zero(limbs_[index]);
+                return Square(int(index * BITS_PER_LIMB) + bit);
+            }
+        }
+
+        return SQ_NONE;
+    }
+
     // Clears and returns the least-significant set bit.
     // Precondition: the bitboard is not empty.
     constexpr Square pop_lsb() noexcept {

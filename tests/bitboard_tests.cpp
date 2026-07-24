@@ -174,6 +174,23 @@ void test_lsb_operations() {
     expect(bitboard.empty(), "pop_lsb clears each returned bit");
 }
 
+void test_msb_operation() {
+    using namespace Mockingbird;
+
+    Bitboard bitboard;
+    bitboard.set(Square(7));
+    bitboard.set(Square(64));
+    bitboard.set(Square(192));
+
+    expect(bitboard.msb() == Square(192), "msb returns the highest set bit");
+
+    bitboard.clear(Square(192));
+    expect(bitboard.msb() == Square(64), "msb crosses a limb boundary");
+
+    bitboard.clear(Square(64));
+    expect(bitboard.msb() == Square(7), "msb returns the final set bit");
+}
+
 void test_playable_square_mask() {
     using namespace Mockingbird;
 
@@ -211,6 +228,7 @@ int main() {
     test_bitwise_operations();
     test_shifts();
     test_lsb_operations();
+    test_msb_operation();
     test_playable_square_mask();
 
     if (failures != 0) {
