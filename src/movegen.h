@@ -62,6 +62,25 @@ constexpr void generate_knight_moves(
     }
 }
 
+// Appends pseudo-legal king moves for the side to move. Squares occupied by
+// either member of that side's team are excluded. Attacked-square constraints
+// and castling are not evaluated.
+// Precondition: moves has enough remaining capacity for the generated moves.
+constexpr void generate_king_moves(
+  const Position& position, MoveList& moves) noexcept {
+    const Color us = position.side_to_move();
+    const Bitboard friendly = position.pieces(team_of(us));
+    Bitboard kings = position.pieces(us, KING);
+
+    while (kings) {
+        const Square from = kings.pop_lsb();
+        Bitboard destinations = king_attacks(from) & ~friendly;
+
+        while (destinations)
+            moves.push_back(Move::normal(from, destinations.pop_lsb()));
+    }
+}
+
 // Appends pseudo-legal bishop moves for the side to move. Occupied squares stop
 // each ray, and destinations occupied by either member of the moving side's
 // team are excluded. Check and pin constraints are not evaluated.

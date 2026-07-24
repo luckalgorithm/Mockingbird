@@ -48,6 +48,21 @@ static_assert(constexpr_move_list_operations());
 
 static_assert(constexpr_slider_generation());
 
+[[nodiscard]] constexpr bool constexpr_king_generation() {
+    using namespace Mockingbird;
+
+    constexpr Square d1 = make_square(FILE_D, RANK_1);
+
+    Position position;
+    position.put_piece(R_KING, d1);
+
+    MoveList moves;
+    generate_king_moves(position, moves);
+    return moves.size() == 3;
+}
+
+static_assert(constexpr_king_generation());
+
 [[nodiscard]] Mockingbird::Bitboard destinations_from(
   const Mockingbird::MoveList& moves, Mockingbird::Square source) {
     using namespace Mockingbird;
@@ -276,6 +291,135 @@ void test_every_single_blocker() {
     }
 }
 
+void test_empty_and_inactive_kings() {
+    using namespace Mockingbird;
+
+    constexpr Square d1 = make_square(FILE_D, RANK_1);
+    constexpr Square h8 = make_square(FILE_H, RANK_8);
+
+    Position position;
+    MoveList moves;
+    generate_king_moves(position, moves);
+    expect(moves.empty(), "an empty position has no king moves");
+
+    position.put_piece(Y_KING, d1);
+    position.put_piece(B_KING, h8);
+    generate_king_moves(position, moves);
+    expect(moves.empty(), "teammate and opponent kings do not move on Red's turn");
+}
+
+void test_known_king_destinations() {
+    using namespace Mockingbird;
+
+    constexpr Square h8 = make_square(FILE_H, RANK_8);
+    constexpr Square g7 = make_square(FILE_G, RANK_7);
+    constexpr Square g8 = make_square(FILE_G, RANK_8);
+    constexpr Square g9 = make_square(FILE_G, RANK_9);
+    constexpr Square h7 = make_square(FILE_H, RANK_7);
+
+    Position position;
+    position.put_piece(R_KING, h8);
+    position.put_piece(R_PAWN, g7);
+    position.put_piece(Y_ROOK, g8);
+    position.put_piece(B_QUEEN, g9);
+    position.put_piece(G_BISHOP, h7);
+
+    MoveList moves;
+    generate_king_moves(position, moves);
+
+    const Bitboard destinations = destinations_from(moves, h8);
+    expect(moves.size() == 6, "two friendly king destinations are excluded");
+    expect(!destinations.test(g7), "own piece blocks a king destination");
+    expect(!destinations.test(g8), "teammate piece blocks a king destination");
+    expect(destinations.test(g9), "Blue piece is a capturable king destination");
+    expect(destinations.test(h7), "Green piece is a capturable king destination");
+
+    for (const Move move : moves)
+        expect(move.type() == MoveType::NORMAL,
+               "pseudo-legal king generation emits only normal moves");
+}
+
+void test_attacked_king_destination_is_not_filtered() {
+    using namespace Mockingbird;
+
+    constexpr Square h8 = make_square(FILE_H, RANK_8);
+    constexpr Square h9 = make_square(FILE_H, RANK_9);
+    constexpr Square h14 = make_square(FILE_H, RANK_14);
+
+    Position position;
+    position.put_piece(R_KING, h8);
+    position.put_piece(B_ROOK, h14);
+
+    MoveList moves;
+    generate_king_moves(position, moves);
+
+    expect(destinations_from(moves, h8).test(h9),
+           "pseudo-legal king generation retains an attacked destination");
+}
+
+void test_king_append_behavior() {
+    using namespace Mockingbird;
+
+    constexpr Square d1 = make_square(FILE_D, RANK_1);
+    constexpr Square e1 = make_square(FILE_E, RANK_1);
+
+    Position position;
+    position.put_piece(R_KING, d1);
+
+    MoveList moves;
+    const Move existing = Move::normal(d1, e1);
+    moves.push_back(existing);
+    generate_king_moves(position, moves);
+
+    expect(moves[0] == existing, "king generation appends to an existing move list");
+    expect(moves.size()
+             == 1 + static_cast<std::size_t>(king_attacks(d1).popcount()),
+           "appended king moves preserve the existing size");
+}
+
+void test_every_single_king_blocker() {
+    using namespace Mockingbird;
+
+    // For every player and king source, places each color on every other
+    // playable square. This covers all own, teammate, and opponent blockers.
+    for (int moving_color_index = 0; moving_color_index < COLOR_NB;
+         ++moving_color_index) {
+        const Color moving_color = Color(moving_color_index);
+
+        for (int source_index = 0; source_index < SQUARE_NB; ++source_index) {
+            const Square source = Square(source_index);
+            if (!is_ok(source))
+                continue;
+
+            for (int blocker_index = 0; blocker_index < SQUARE_NB; ++blocker_index) {
+                const Square blocker = Square(blocker_index);
+                if (!is_ok(blocker) || blocker == source)
+                    continue;
+
+                for (int blocker_color_index = 0; blocker_color_index < COLOR_NB;
+                     ++blocker_color_index) {
+                    const Color blocker_color = Color(blocker_color_index);
+
+                    Position position;
+                    position.set_side_to_move(moving_color);
+                    position.put_piece(make_piece(moving_color, KING), source);
+                    position.put_piece(make_piece(blocker_color, PAWN), blocker);
+
+                    Bitboard expected = king_attacks(source);
+                    if (team_of(blocker_color) == team_of(moving_color))
+                        expected.clear(blocker);
+
+                    MoveList moves;
+                    generate_king_moves(position, moves);
+
+                    expect(matches_single_source(moves, source, expected),
+                           "king moves match every single-blocker position");
+                }
+            }
+        }
+    }
+}
+
 void test_empty_and_inactive_sliders() {
     using namespace Mockingbird;
 
@@ -487,6 +631,11 @@ int main() {
     test_known_friendly_and_enemy_destinations();
     test_multiple_active_knights_and_append_behavior();
     test_every_single_blocker();
+    test_empty_and_inactive_kings();
+    test_known_king_destinations();
+    test_attacked_king_destination_is_not_filtered();
+    test_king_append_behavior();
+    test_every_single_king_blocker();
     test_empty_and_inactive_sliders();
     test_known_rook_blockers();
     test_known_bishop_blockers();
