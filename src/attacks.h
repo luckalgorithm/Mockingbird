@@ -34,6 +34,14 @@ inline constexpr std::array<int, 8> KNIGHT_OFFSETS = {
   2 * SOUTH + WEST,
 };
 
+// Pawn capture offsets are indexed by Color.
+inline constexpr std::array<std::array<int, 2>, COLOR_NB> PAWN_OFFSETS = {{
+  {NORTH_WEST, NORTH_EAST},
+  {NORTH_EAST, SOUTH_EAST},
+  {SOUTH_EAST, SOUTH_WEST},
+  {SOUTH_WEST, NORTH_WEST},
+}};
+
 template<std::size_t OffsetCount>
 [[nodiscard]] consteval std::array<Bitboard, SQUARE_NB> make_attack_table(
   const std::array<int, OffsetCount>& offsets) {
@@ -60,6 +68,12 @@ template<std::size_t OffsetCount>
 // Entries for padding and cut-out corner indices are empty.
 inline constexpr auto KING_ATTACKS = Detail::make_attack_table(Detail::KING_OFFSETS);
 inline constexpr auto KNIGHT_ATTACKS = Detail::make_attack_table(Detail::KNIGHT_OFFSETS);
+inline constexpr std::array<std::array<Bitboard, SQUARE_NB>, COLOR_NB> PAWN_ATTACKS = {
+  Detail::make_attack_table(Detail::PAWN_OFFSETS[RED]),
+  Detail::make_attack_table(Detail::PAWN_OFFSETS[BLUE]),
+  Detail::make_attack_table(Detail::PAWN_OFFSETS[YELLOW]),
+  Detail::make_attack_table(Detail::PAWN_OFFSETS[GREEN]),
+};
 
 // Precondition: square is in the mailbox index range 0..255.
 [[nodiscard]] constexpr const Bitboard& king_attacks(Square square) noexcept {
@@ -73,7 +87,19 @@ inline constexpr auto KNIGHT_ATTACKS = Detail::make_attack_table(Detail::KNIGHT_
     return KNIGHT_ATTACKS[std::size_t(square)];
 }
 
+// Preconditions: color is valid and square is in the mailbox index range
+// 0..255.
+[[nodiscard]] constexpr const Bitboard& pawn_attacks(Color color, Square square) noexcept {
+    assert(is_ok(color));
+    assert(static_cast<unsigned>(square) < SQUARE_NB);
+    return PAWN_ATTACKS[std::size_t(color)][std::size_t(square)];
+}
+
 static_assert(king_attacks(make_square(FILE_H, RANK_8)).popcount() == 8);
 static_assert(knight_attacks(make_square(FILE_H, RANK_8)).popcount() == 8);
+static_assert(pawn_attacks(RED, make_square(FILE_H, RANK_8)).popcount() == 2);
+static_assert(pawn_attacks(BLUE, make_square(FILE_H, RANK_8)).popcount() == 2);
+static_assert(pawn_attacks(YELLOW, make_square(FILE_H, RANK_8)).popcount() == 2);
+static_assert(pawn_attacks(GREEN, make_square(FILE_H, RANK_8)).popcount() == 2);
 
 }  // namespace Mockingbird

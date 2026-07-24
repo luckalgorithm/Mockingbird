@@ -69,6 +69,50 @@ void test_known_knight_attacks() {
            "a4 does not attack cut-out square c3");
 }
 
+void test_known_pawn_attacks() {
+    using namespace Mockingbird;
+
+    constexpr Square h8 = make_square(FILE_H, RANK_8);
+
+    static_assert(pawn_attacks(RED, h8).popcount() == 2);
+    static_assert(pawn_attacks(BLUE, h8).popcount() == 2);
+    static_assert(pawn_attacks(YELLOW, h8).popcount() == 2);
+    static_assert(pawn_attacks(GREEN, h8).popcount() == 2);
+
+    expect(pawn_attacks(RED, h8).test(make_square(FILE_G, RANK_9)),
+           "red pawn on h8 attacks g9");
+    expect(pawn_attacks(RED, h8).test(make_square(FILE_I, RANK_9)),
+           "red pawn on h8 attacks i9");
+
+    expect(pawn_attacks(BLUE, h8).test(make_square(FILE_I, RANK_9)),
+           "blue pawn on h8 attacks i9");
+    expect(pawn_attacks(BLUE, h8).test(make_square(FILE_I, RANK_7)),
+           "blue pawn on h8 attacks i7");
+
+    expect(pawn_attacks(YELLOW, h8).test(make_square(FILE_I, RANK_7)),
+           "yellow pawn on h8 attacks i7");
+    expect(pawn_attacks(YELLOW, h8).test(make_square(FILE_G, RANK_7)),
+           "yellow pawn on h8 attacks g7");
+
+    expect(pawn_attacks(GREEN, h8).test(make_square(FILE_G, RANK_7)),
+           "green pawn on h8 attacks g7");
+    expect(pawn_attacks(GREEN, h8).test(make_square(FILE_G, RANK_9)),
+           "green pawn on h8 attacks g9");
+
+    constexpr Square d1 = make_square(FILE_D, RANK_1);
+    static_assert(pawn_attacks(RED, d1).popcount() == 1);
+    static_assert(pawn_attacks(BLUE, d1).popcount() == 1);
+    static_assert(pawn_attacks(YELLOW, d1).empty());
+    static_assert(pawn_attacks(GREEN, d1).empty());
+
+    expect(pawn_attacks(RED, d1).test(make_square(FILE_E, RANK_2)),
+           "red pawn on d1 attacks e2");
+    expect(pawn_attacks(BLUE, d1).test(make_square(FILE_E, RANK_2)),
+           "blue pawn on d1 attacks e2");
+    expect(!pawn_attacks(RED, d1).test(make_square(FILE_C, RANK_2)),
+           "red pawn on d1 does not attack cut-out square c2");
+}
+
 void test_all_attack_tables() {
     using namespace Mockingbird;
 
@@ -100,6 +144,33 @@ void test_all_attack_tables() {
             const Square destination = remaining_knight_attacks.pop_lsb();
             expect(is_ok(destination), "knight destination is playable");
             expect(knight_attacks(destination).test(source), "knight attacks are symmetric");
+        }
+    }
+}
+
+void test_all_pawn_attack_tables() {
+    using namespace Mockingbird;
+
+    for (int color_index = 0; color_index < COLOR_NB; ++color_index) {
+        const Color color = Color(color_index);
+
+        for (int source_index = 0; source_index < SQUARE_NB; ++source_index) {
+            const Square source = Square(source_index);
+            const Bitboard attacks = pawn_attacks(color, source);
+
+            if (!is_ok(source)) {
+                expect(attacks.empty(), "non-playable pawn source has no attacks");
+                continue;
+            }
+
+            expect(attacks.popcount() <= 2, "pawn attack count does not exceed two");
+            expect(!attacks.test(source), "pawn does not attack its source square");
+
+            Bitboard remaining_attacks = attacks;
+            while (remaining_attacks) {
+                const Square destination = remaining_attacks.pop_lsb();
+                expect(is_ok(destination), "pawn destination is playable");
+            }
         }
     }
 }
@@ -138,13 +209,51 @@ void test_geometric_equivalence() {
     }
 }
 
+void test_pawn_geometric_equivalence() {
+    using namespace Mockingbird;
+
+    // Compares all source/destination pairs for all four colors with coordinate
+    // distance definitions for pawn captures.
+    for (int color_index = 0; color_index < COLOR_NB; ++color_index) {
+        const Color color = Color(color_index);
+
+        for (int source_index = 0; source_index < SQUARE_NB; ++source_index) {
+            const Square source = Square(source_index);
+
+            for (int destination_index = 0; destination_index < SQUARE_NB;
+                 ++destination_index) {
+                const Square destination = Square(destination_index);
+                bool expected_attack = false;
+
+                if (is_ok(source) && is_ok(destination)) {
+                    const int file_delta = file_of(destination) - file_of(source);
+                    const int rank_delta = rank_of(destination) - rank_of(source);
+
+                    expected_attack =
+                      color == RED    ? rank_delta == 1 && std::abs(file_delta) == 1
+                      : color == BLUE ? file_delta == 1 && std::abs(rank_delta) == 1
+                      : color == YELLOW
+                        ? rank_delta == -1 && std::abs(file_delta) == 1
+                        : file_delta == -1 && std::abs(rank_delta) == 1;
+                }
+
+                expect(pawn_attacks(color, source).test(destination) == expected_attack,
+                       "pawn table matches color-relative coordinate distance");
+            }
+        }
+    }
+}
+
 }  // namespace
 
 int main() {
     test_known_king_attacks();
     test_known_knight_attacks();
+    test_known_pawn_attacks();
     test_all_attack_tables();
+    test_all_pawn_attack_tables();
     test_geometric_equivalence();
+    test_pawn_geometric_equivalence();
 
     if (failures != 0) {
         std::cerr << failures << " attack-table test(s) failed\n";
