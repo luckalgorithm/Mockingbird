@@ -99,6 +99,19 @@ static_assert(constexpr_king_generation());
     return actual_destinations == expected_destinations;
 }
 
+[[nodiscard]] bool move_lists_equal(
+  const Mockingbird::MoveList& left, const Mockingbird::MoveList& right) {
+    if (left.size() != right.size())
+        return false;
+
+    for (std::size_t index = 0; index < left.size(); ++index) {
+        if (left[index] != right[index])
+            return false;
+    }
+
+    return true;
+}
+
 constexpr std::array<Mockingbird::PieceType, 3> SLIDER_TYPES = {
   Mockingbird::BISHOP,
   Mockingbird::ROOK,
@@ -623,6 +636,69 @@ void test_every_single_slider_blocker() {
     }
 }
 
+void test_combined_nonpawn_generation() {
+    using namespace Mockingbird;
+
+    constexpr std::array<Square, 5> source_squares = {
+      make_square(FILE_D, RANK_1),
+      make_square(FILE_F, RANK_4),
+      make_square(FILE_H, RANK_8),
+      make_square(FILE_J, RANK_10),
+      make_square(FILE_N, RANK_4),
+    };
+    constexpr std::array<PieceType, 5> piece_types = {
+      KNIGHT,
+      BISHOP,
+      ROOK,
+      QUEEN,
+      KING,
+    };
+    constexpr std::array<Square, 4> blocker_squares = {
+      make_square(FILE_E, RANK_3),
+      make_square(FILE_G, RANK_6),
+      make_square(FILE_I, RANK_9),
+      make_square(FILE_K, RANK_11),
+    };
+
+    for (int moving_color_index = 0; moving_color_index < COLOR_NB;
+         ++moving_color_index) {
+        const Color moving_color = Color(moving_color_index);
+        const Color next = next_color(moving_color);
+        const Color teammate = Color((moving_color + 2) % COLOR_NB);
+        const Color previous = previous_color(moving_color);
+
+        Position position;
+        position.set_side_to_move(moving_color);
+
+        for (std::size_t index = 0; index < source_squares.size(); ++index)
+            position.put_piece(
+              make_piece(moving_color, piece_types[index]), source_squares[index]);
+
+        position.put_piece(make_piece(moving_color, PAWN), blocker_squares[0]);
+        position.put_piece(make_piece(teammate, PAWN), blocker_squares[1]);
+        position.put_piece(make_piece(next, PAWN), blocker_squares[2]);
+        position.put_piece(make_piece(previous, PAWN), blocker_squares[3]);
+
+        const Move existing = Move::normal(
+          make_square(FILE_D, RANK_2), make_square(FILE_D, RANK_3));
+
+        MoveList expected;
+        expected.push_back(existing);
+        generate_knight_moves(position, expected);
+        generate_bishop_moves(position, expected);
+        generate_rook_moves(position, expected);
+        generate_queen_moves(position, expected);
+        generate_king_moves(position, expected);
+
+        MoveList actual;
+        actual.push_back(existing);
+        generate_nonpawn_moves(position, actual);
+
+        expect(move_lists_equal(actual, expected),
+               "combined non-pawn generation matches the individual generators");
+    }
+}
+
 }  // namespace
 
 int main() {
@@ -642,6 +718,7 @@ int main() {
     test_queen_combines_rook_and_bishop_moves();
     test_multiple_sliders_and_append_behavior();
     test_every_single_slider_blocker();
+    test_combined_nonpawn_generation();
 
     if (failures != 0) {
         std::cerr << failures << " move-generation test(s) failed\n";

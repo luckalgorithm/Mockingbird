@@ -117,4 +117,14 @@ constexpr void generate_sliding_moves(
     generate_queen_moves(position, moves);
 }
 
+// Appends knight, bishop, rook, queen, and king moves in that order.
+// Pawn moves and castling are not generated.
+// Precondition: moves has enough remaining capacity for the generated moves.
+constexpr void generate_nonpawn_moves(
+  const Position& position, MoveList& moves) noexcept {
+    generate_knight_moves(position, moves);
+    generate_sliding_moves(position, moves);
+    generate_king_moves(position, moves);
+}
+
 }  // namespace Mockingbird
