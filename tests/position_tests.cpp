@@ -9,6 +9,44 @@ namespace {
 
 int failures = 0;
 
+// Rotates a square clockwise around the center of the 14x14 board.
+[[nodiscard]] constexpr Mockingbird::Square rotate_clockwise(
+  Mockingbird::Square square) noexcept {
+    using namespace Mockingbird;
+
+    return make_square(
+      File(int(rank_of(square))),
+      Rank(BOARD_FILES + 1 - int(file_of(square))));
+}
+
+constexpr Mockingbird::Square RED_EN_PASSANT =
+  Mockingbird::make_square(Mockingbird::FILE_D, Mockingbird::RANK_3);
+constexpr Mockingbird::Square BLUE_EN_PASSANT =
+  rotate_clockwise(RED_EN_PASSANT);
+constexpr Mockingbird::Square YELLOW_EN_PASSANT =
+  rotate_clockwise(BLUE_EN_PASSANT);
+constexpr Mockingbird::Square GREEN_EN_PASSANT =
+  rotate_clockwise(YELLOW_EN_PASSANT);
+
+constexpr std::array<Mockingbird::Square, Mockingbird::COLOR_NB>
+  EN_PASSANT_SQUARES = {
+    RED_EN_PASSANT,
+    BLUE_EN_PASSANT,
+    YELLOW_EN_PASSANT,
+    GREEN_EN_PASSANT,
+  };
+
+static_assert(BLUE_EN_PASSANT
+              == Mockingbird::make_square(
+                Mockingbird::FILE_C, Mockingbird::RANK_11));
+static_assert(YELLOW_EN_PASSANT
+              == Mockingbird::make_square(
+                Mockingbird::FILE_K, Mockingbird::RANK_12));
+static_assert(GREEN_EN_PASSANT
+              == Mockingbird::make_square(
+                Mockingbird::FILE_L, Mockingbird::RANK_4));
+static_assert(rotate_clockwise(GREEN_EN_PASSANT) == RED_EN_PASSANT);
+
 // Records a failed condition and allows the remaining tests to run.
 void expect(bool condition, std::string_view message) {
     if (condition)
@@ -93,6 +131,37 @@ void expect_consistent(const Mockingbird::Position& position) {
 
 static_assert(constexpr_position_operations());
 
+[[nodiscard]] constexpr bool constexpr_en_passant_operations() {
+    using namespace Mockingbird;
+
+    Position position;
+
+    for (int color_index = 0; color_index < COLOR_NB; ++color_index) {
+        const Color color = Color(color_index);
+        if (position.en_passant_square(color) != SQ_NONE)
+            return false;
+
+        position.set_en_passant_square(
+          color, EN_PASSANT_SQUARES[std::size_t(color)]);
+    }
+
+    position.clear_en_passant_square(BLUE);
+    if (position.en_passant_square(BLUE) != SQ_NONE
+        || position.en_passant_square(RED) != RED_EN_PASSANT
+        || position.en_passant_square(YELLOW) != YELLOW_EN_PASSANT
+        || position.en_passant_square(GREEN) != GREEN_EN_PASSANT)
+        return false;
+
+    position.clear_en_passant_squares();
+    for (int color_index = 0; color_index < COLOR_NB; ++color_index)
+        if (position.en_passant_square(Color(color_index)) != SQ_NONE)
+            return false;
+
+    return true;
+}
+
+static_assert(constexpr_en_passant_operations());
+
 void test_default_position() {
     using namespace Mockingbird;
 
@@ -105,11 +174,87 @@ void test_default_position() {
         expect(position.pieces(Color(color_index)).empty(),
                "default color occupancy is empty");
 
+    for (int color_index = 0; color_index < COLOR_NB; ++color_index)
+        expect(position.en_passant_square(Color(color_index)) == SQ_NONE,
+               "default en-passant target is absent");
+
     for (int type_index = PAWN; type_index <= KING; ++type_index)
         expect(position.pieces(PieceType(type_index)).empty(),
                "default piece-type occupancy is empty");
 
     expect_consistent(position);
+}
+
+void test_en_passant_state() {
+    using namespace Mockingbird;
+
+    Position position;
+
+    for (int color_index = 0; color_index < COLOR_NB; ++color_index) {
+        const Color color = Color(color_index);
+        position.set_en_passant_square(
+          color, EN_PASSANT_SQUARES[std::size_t(color)]);
+    }
+
+    for (int color_index = 0; color_index < COLOR_NB; ++color_index) {
+        const Color color = Color(color_index);
+        expect(position.en_passant_square(color)
+                 == EN_PASSANT_SQUARES[std::size_t(color)],
+               "each color stores an independent en-passant target");
+    }
+
+    constexpr Square replacement =
+      make_square(FILE_E, RANK_3);
+    position.set_en_passant_square(RED, replacement);
+    expect(position.en_passant_square(RED) == replacement,
+           "setting a color again replaces its en-passant target");
+    expect(position.en_passant_square(BLUE) == BLUE_EN_PASSANT,
+           "replacing one target preserves the other colors");
+
+    position.clear_en_passant_square(YELLOW);
+    expect(position.en_passant_square(YELLOW) == SQ_NONE,
+           "clearing one color removes its en-passant target");
+    expect(position.en_passant_square(RED) == replacement
+             && position.en_passant_square(BLUE) == BLUE_EN_PASSANT
+             && position.en_passant_square(GREEN) == GREEN_EN_PASSANT,
+           "clearing one target preserves the other colors");
+
+    const Position copy = position;
+    position.clear_en_passant_square(RED);
+    expect(copy.en_passant_square(RED) == replacement,
+           "a copied position retains its own en-passant state");
+
+    position.clear_en_passant_squares();
+    for (int color_index = 0; color_index < COLOR_NB; ++color_index)
+        expect(position.en_passant_square(Color(color_index)) == SQ_NONE,
+               "clearing all targets resets every color");
+}
+
+void test_raw_mutations_preserve_en_passant_state() {
+    using namespace Mockingbird;
+
+    constexpr Square d4 = make_square(FILE_D, RANK_4);
+    constexpr Square d5 = make_square(FILE_D, RANK_5);
+
+    Position position;
+    for (int color_index = 0; color_index < COLOR_NB; ++color_index) {
+        const Color color = Color(color_index);
+        position.set_en_passant_square(
+          color, EN_PASSANT_SQUARES[std::size_t(color)]);
+    }
+
+    // Raw state mutations do not apply move-rule expiration.
+    position.set_side_to_move(GREEN);
+    position.put_piece(R_ROOK, d4);
+    position.move_piece(d4, d5);
+    position.remove_piece(d5);
+
+    for (int color_index = 0; color_index < COLOR_NB; ++color_index) {
+        const Color color = Color(color_index);
+        expect(position.en_passant_square(color)
+                 == EN_PASSANT_SQUARES[std::size_t(color)],
+               "raw position mutations preserve en-passant targets");
+    }
 }
 
 void test_all_piece_encodings() {
@@ -256,15 +401,23 @@ void test_side_to_move_and_clear() {
     expect(position.side_to_move() == GREEN, "side to move can be set to Green");
 
     position.put_piece(Y_KING, h8);
+    for (int color_index = 0; color_index < COLOR_NB; ++color_index) {
+        const Color color = Color(color_index);
+        position.set_en_passant_square(
+          color, EN_PASSANT_SQUARES[std::size_t(color)]);
+    }
     position.clear();
 
     expect(position.side_to_move() == RED, "clear restores Red as the side to move");
     expect(position.occupied().empty(), "clear resets combined occupancy");
     expect(position.empty(h8), "clear resets the mailbox");
 
-    for (int color_index = 0; color_index < COLOR_NB; ++color_index)
+    for (int color_index = 0; color_index < COLOR_NB; ++color_index) {
         expect(position.pieces(Color(color_index)).empty(),
                "clear resets every color occupancy");
+        expect(position.en_passant_square(Color(color_index)) == SQ_NONE,
+               "clear resets every en-passant target");
+    }
 
     for (int type_index = PAWN; type_index <= KING; ++type_index)
         expect(position.pieces(PieceType(type_index)).empty(),
@@ -277,6 +430,8 @@ void test_side_to_move_and_clear() {
 
 int main() {
     test_default_position();
+    test_en_passant_state();
+    test_raw_mutations_preserve_en_passant_state();
     test_all_piece_encodings();
     test_placement_and_removal();
     test_quiet_move();
