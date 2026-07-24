@@ -23,6 +23,11 @@ enum Team : int {
     TEAM_NB
 };
 
+// TEAM_NB is a count/sentinel, not a team.
+[[nodiscard]] constexpr bool is_ok(Team team) noexcept {
+    return team >= RED_YELLOW && team < TEAM_NB;
+}
+
 // COLOR_NB is a count/sentinel, not a playable color.
 [[nodiscard]] constexpr bool is_ok(Color color) noexcept {
     return color >= RED && color < COLOR_NB;

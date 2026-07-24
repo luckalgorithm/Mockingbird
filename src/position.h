@@ -50,6 +50,14 @@ class Position {
         return by_color_[std::size_t(color)];
     }
 
+    // Precondition: team is valid.
+    [[nodiscard]] constexpr Bitboard pieces(Team team) const noexcept {
+        assert(is_ok(team));
+
+        return team == RED_YELLOW ? pieces(RED) | pieces(YELLOW)
+                                  : pieces(BLUE) | pieces(GREEN);
+    }
+
     // Precondition: piece_type is valid.
     [[nodiscard]] constexpr const Bitboard& pieces(PieceType piece_type) const noexcept {
         assert(is_ok(piece_type));

@@ -20,6 +20,10 @@ void expect(bool condition, std::string_view message) {
 void test_players_and_teams() {
     using namespace Mockingbird;
 
+    expect(is_ok(RED_YELLOW), "red-yellow is a valid team");
+    expect(is_ok(BLUE_GREEN), "blue-green is a valid team");
+    expect(!is_ok(TEAM_NB), "TEAM_NB is not a valid team");
+
     expect(is_ok(RED), "red is a valid color");
     expect(is_ok(GREEN), "green is a valid color");
     expect(!is_ok(COLOR_NB), "COLOR_NB is not a valid color");

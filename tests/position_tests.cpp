@@ -44,6 +44,12 @@ void expect_consistent(const Mockingbird::Position& position) {
 
     expect(position.occupied() == expected_occupied,
            "combined occupancy matches the mailbox");
+    expect(position.pieces(RED_YELLOW)
+             == (expected_by_color[RED] | expected_by_color[YELLOW]),
+           "red-yellow occupancy matches the mailbox");
+    expect(position.pieces(BLUE_GREEN)
+             == (expected_by_color[BLUE] | expected_by_color[GREEN]),
+           "blue-green occupancy matches the mailbox");
 
     for (int color_index = 0; color_index < COLOR_NB; ++color_index) {
         const Color color = Color(color_index);
