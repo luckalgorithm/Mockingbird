@@ -1,6 +1,8 @@
 #pragma once
 
 #include <cstddef>
+#include <cstdint>
+#include <utility>
 
 namespace Mockingbird {
 
@@ -47,6 +49,29 @@ enum Team : int {
 [[nodiscard]] constexpr Team team_of(Color color) noexcept {
     return color == RED || color == YELLOW ? RED_YELLOW : BLUE_GREEN;
 }
+
+// -----------------------------------------------------------------------------
+// Castling
+// -----------------------------------------------------------------------------
+
+enum class CastlingSide : std::uint8_t {
+    KING_SIDE,
+    QUEEN_SIDE,
+    COUNT
+};
+
+inline constexpr std::size_t CASTLING_SIDE_NB =
+  static_cast<std::size_t>(std::to_underlying(CastlingSide::COUNT));
+
+// COUNT is a sentinel, not a castling side.
+[[nodiscard]] constexpr bool is_ok(CastlingSide side) noexcept {
+    return std::to_underlying(side)
+        < std::to_underlying(CastlingSide::COUNT);
+}
+
+static_assert(std::size_t(COLOR_NB) * CASTLING_SIDE_NB == 8);
+static_assert(CASTLING_SIDE_NB == 2);
+static_assert(sizeof(CastlingSide) == sizeof(std::uint8_t));
 
 // -----------------------------------------------------------------------------
 // Pieces

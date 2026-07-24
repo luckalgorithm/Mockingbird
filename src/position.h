@@ -3,6 +3,8 @@
 #include <array>
 #include <cassert>
 #include <cstddef>
+#include <cstdint>
+#include <utility>
 
 #include "bitboard.h"
 #include "board.h"
@@ -13,8 +15,8 @@ namespace Mockingbird {
 // Piece mutations update every representation before returning.
 class Position {
   public:
-    // A default position is empty, has Red to move, and has no en-passant
-    // targets.
+    // A default position is empty, has Red to move, and has no castling rights
+    // or en-passant targets.
     constexpr Position() noexcept {
         en_passant_squares_.fill(SQ_NONE);
     }
@@ -41,6 +43,53 @@ class Position {
     constexpr void set_side_to_move(Color color) noexcept {
         assert(is_ok(color));
         side_to_move_ = color;
+    }
+
+    // A stored right records move history only. Piece locations, path
+    // occupancy, and attacked squares are not evaluated.
+    // Preconditions: color and side are valid.
+    [[nodiscard]] constexpr bool has_castling_right(
+      Color color, CastlingSide side) const noexcept {
+        assert(is_ok(color));
+        assert(is_ok(side));
+        return (castling_rights_
+                & castling_right_mask(color, side))
+            != 0;
+    }
+
+    // Preconditions: color and side are valid.
+    constexpr void set_castling_right(
+      Color color, CastlingSide side) noexcept {
+        assert(is_ok(color));
+        assert(is_ok(side));
+        castling_rights_ =
+          static_cast<std::uint8_t>(
+            castling_rights_
+            | castling_right_mask(color, side));
+    }
+
+    // Preconditions: color and side are valid.
+    constexpr void clear_castling_right(
+      Color color, CastlingSide side) noexcept {
+        assert(is_ok(color));
+        assert(is_ok(side));
+        castling_rights_ =
+          static_cast<std::uint8_t>(
+            castling_rights_
+            & static_cast<std::uint8_t>(
+              ~castling_right_mask(color, side)));
+    }
+
+    // Clears both rights for one color.
+    // Precondition: color is valid.
+    constexpr void clear_castling_rights(Color color) noexcept {
+        assert(is_ok(color));
+        clear_castling_right(color, CastlingSide::KING_SIDE);
+        clear_castling_right(color, CastlingSide::QUEEN_SIDE);
+    }
+
+    constexpr void clear_castling_rights() noexcept {
+        castling_rights_ = 0;
     }
 
     // The indexed color is the owner of the pawn that created the target.
@@ -149,8 +198,8 @@ class Position {
         return captured;
     }
 
-    // Removes all pieces, clears all en-passant targets, and restores Red as
-    // the side to move.
+    // Removes all pieces, clears all rule state, and restores Red as the side
+    // to move.
     constexpr void clear() noexcept {
         board_.clear();
         occupied_.clear();
@@ -161,21 +210,36 @@ class Position {
         for (Bitboard& bitboard : by_type_)
             bitboard.clear();
 
+        clear_castling_rights();
         clear_en_passant_squares();
         side_to_move_ = RED;
     }
 
   private:
+    // Bits 2*c and 2*c+1 store the kingside and queenside rights for Color c.
+    [[nodiscard]] static constexpr std::uint8_t castling_right_mask(
+      Color color, CastlingSide side) noexcept {
+        const std::size_t bit =
+          std::size_t(color) * CASTLING_SIDE_NB
+          + static_cast<std::size_t>(std::to_underlying(side));
+        return static_cast<std::uint8_t>(1U << bit);
+    }
+
     Board board_;
     Bitboard occupied_;
     std::array<Bitboard, COLOR_NB> by_color_{};
     std::array<Bitboard, PIECE_TYPE_NB> by_type_{};
     std::array<Square, COLOR_NB> en_passant_squares_{};
+    std::uint8_t castling_rights_ = 0;
     Color side_to_move_ = RED;
 };
 
 static_assert(Position{}.side_to_move() == RED);
 static_assert(Position{}.occupied().empty());
+static_assert(!Position{}.has_castling_right(
+  RED, CastlingSide::KING_SIDE));
+static_assert(!Position{}.has_castling_right(
+  RED, CastlingSide::QUEEN_SIDE));
 static_assert(Position{}.en_passant_square(RED) == SQ_NONE);
 static_assert(Position{}.en_passant_square(BLUE) == SQ_NONE);
 static_assert(Position{}.en_passant_square(YELLOW) == SQ_NONE);

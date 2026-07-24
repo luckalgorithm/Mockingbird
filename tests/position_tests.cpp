@@ -36,6 +36,14 @@ constexpr std::array<Mockingbird::Square, Mockingbird::COLOR_NB>
     GREEN_EN_PASSANT,
   };
 
+constexpr std::array<
+  Mockingbird::CastlingSide,
+  Mockingbird::CASTLING_SIDE_NB>
+  CASTLING_SIDES = {
+    Mockingbird::CastlingSide::KING_SIDE,
+    Mockingbird::CastlingSide::QUEEN_SIDE,
+  };
+
 static_assert(BLUE_EN_PASSANT
               == Mockingbird::make_square(
                 Mockingbird::FILE_C, Mockingbird::RANK_11));
@@ -46,6 +54,16 @@ static_assert(GREEN_EN_PASSANT
               == Mockingbird::make_square(
                 Mockingbird::FILE_L, Mockingbird::RANK_4));
 static_assert(rotate_clockwise(GREEN_EN_PASSANT) == RED_EN_PASSANT);
+static_assert(Mockingbird::is_ok(
+  Mockingbird::CastlingSide::KING_SIDE));
+static_assert(Mockingbird::is_ok(
+  Mockingbird::CastlingSide::QUEEN_SIDE));
+static_assert(!Mockingbird::is_ok(
+  Mockingbird::CastlingSide::COUNT));
+static_assert(!Mockingbird::is_ok(
+  static_cast<Mockingbird::CastlingSide>(255)));
+static_assert(Mockingbird::CASTLING_SIDE_NB == 2);
+static_assert(sizeof(Mockingbird::CastlingSide) == 1);
 
 // Records a failed condition and allows the remaining tests to run.
 void expect(bool condition, std::string_view message) {
@@ -162,6 +180,50 @@ static_assert(constexpr_position_operations());
 
 static_assert(constexpr_en_passant_operations());
 
+[[nodiscard]] constexpr bool constexpr_castling_right_operations() {
+    using namespace Mockingbird;
+
+    Position position;
+
+    for (int color_index = 0; color_index < COLOR_NB; ++color_index) {
+        const Color color = Color(color_index);
+        for (const CastlingSide side : CASTLING_SIDES) {
+            if (position.has_castling_right(color, side))
+                return false;
+            position.set_castling_right(color, side);
+        }
+    }
+
+    position.clear_castling_right(
+      BLUE, CastlingSide::KING_SIDE);
+    if (position.has_castling_right(
+          BLUE, CastlingSide::KING_SIDE)
+        || !position.has_castling_right(
+          BLUE, CastlingSide::QUEEN_SIDE))
+        return false;
+
+    position.set_castling_right(
+      BLUE, CastlingSide::KING_SIDE);
+    position.clear_castling_rights(YELLOW);
+
+    for (const CastlingSide side : CASTLING_SIDES) {
+        if (position.has_castling_right(YELLOW, side))
+            return false;
+    }
+
+    position.clear_castling_rights();
+    for (int color_index = 0; color_index < COLOR_NB; ++color_index) {
+        const Color color = Color(color_index);
+        for (const CastlingSide side : CASTLING_SIDES)
+            if (position.has_castling_right(color, side))
+                return false;
+    }
+
+    return true;
+}
+
+static_assert(constexpr_castling_right_operations());
+
 void test_default_position() {
     using namespace Mockingbird;
 
@@ -177,6 +239,13 @@ void test_default_position() {
     for (int color_index = 0; color_index < COLOR_NB; ++color_index)
         expect(position.en_passant_square(Color(color_index)) == SQ_NONE,
                "default en-passant target is absent");
+
+    for (int color_index = 0; color_index < COLOR_NB; ++color_index) {
+        const Color color = Color(color_index);
+        for (const CastlingSide side : CASTLING_SIDES)
+            expect(!position.has_castling_right(color, side),
+                   "default castling right is absent");
+    }
 
     for (int type_index = PAWN; type_index <= KING; ++type_index)
         expect(position.pieces(PieceType(type_index)).empty(),
@@ -230,7 +299,123 @@ void test_en_passant_state() {
                "clearing all targets resets every color");
 }
 
-void test_raw_mutations_preserve_en_passant_state() {
+void test_every_castling_right_subset() {
+    using namespace Mockingbird;
+
+    constexpr unsigned right_count =
+      static_cast<unsigned>(COLOR_NB)
+      * static_cast<unsigned>(CASTLING_SIDE_NB);
+    constexpr unsigned subset_count = 1U << right_count;
+
+    for (unsigned subset = 0; subset < subset_count; ++subset) {
+        Position position;
+        unsigned bit_index = 0;
+
+        for (int color_index = 0; color_index < COLOR_NB; ++color_index) {
+            const Color color = Color(color_index);
+            for (const CastlingSide side : CASTLING_SIDES) {
+                const bool expected =
+                  (subset & (1U << bit_index)) != 0;
+
+                if (expected) {
+                    position.set_castling_right(color, side);
+                    position.set_castling_right(color, side);
+                } else {
+                    position.clear_castling_right(color, side);
+                }
+
+                ++bit_index;
+            }
+        }
+
+        bit_index = 0;
+        for (int color_index = 0; color_index < COLOR_NB; ++color_index) {
+            const Color color = Color(color_index);
+            for (const CastlingSide side : CASTLING_SIDES) {
+                const bool expected =
+                  (subset & (1U << bit_index)) != 0;
+                expect(position.has_castling_right(color, side)
+                         == expected,
+                       "castling-right subset round-trips");
+                ++bit_index;
+            }
+        }
+    }
+}
+
+void test_castling_right_clearing_and_copying() {
+    using namespace Mockingbird;
+
+    for (int cleared_color_index = 0;
+         cleared_color_index < COLOR_NB;
+         ++cleared_color_index) {
+        const Color cleared_color = Color(cleared_color_index);
+
+        for (const CastlingSide cleared_side : CASTLING_SIDES) {
+            Position position;
+            for (int color_index = 0; color_index < COLOR_NB; ++color_index) {
+                const Color color = Color(color_index);
+                for (const CastlingSide side : CASTLING_SIDES)
+                    position.set_castling_right(color, side);
+            }
+
+            position.clear_castling_right(
+              cleared_color, cleared_side);
+
+            for (int color_index = 0;
+                 color_index < COLOR_NB;
+                 ++color_index) {
+                const Color color = Color(color_index);
+                for (const CastlingSide side : CASTLING_SIDES) {
+                    const bool expected =
+                      color != cleared_color || side != cleared_side;
+                    expect(position.has_castling_right(color, side)
+                             == expected,
+                           "clearing one castling right preserves the other seven");
+                }
+            }
+        }
+    }
+
+    for (int cleared_color_index = 0;
+         cleared_color_index < COLOR_NB;
+         ++cleared_color_index) {
+        const Color cleared_color = Color(cleared_color_index);
+        Position position;
+
+        for (int color_index = 0; color_index < COLOR_NB; ++color_index) {
+            const Color color = Color(color_index);
+            for (const CastlingSide side : CASTLING_SIDES)
+                position.set_castling_right(color, side);
+        }
+
+        position.clear_castling_rights(cleared_color);
+
+        for (int color_index = 0; color_index < COLOR_NB; ++color_index) {
+            const Color color = Color(color_index);
+            for (const CastlingSide side : CASTLING_SIDES) {
+                expect(position.has_castling_right(color, side)
+                         == (color != cleared_color),
+                       "clearing one color preserves the other six rights");
+            }
+        }
+    }
+
+    Position original;
+    original.set_castling_right(
+      GREEN, CastlingSide::QUEEN_SIDE);
+    const Position copy = original;
+    original.clear_castling_rights();
+
+    expect(copy.has_castling_right(
+             GREEN, CastlingSide::QUEEN_SIDE),
+           "a copied position retains its own castling rights");
+    expect(!original.has_castling_right(
+             GREEN, CastlingSide::QUEEN_SIDE),
+           "global clearing removes every castling right");
+}
+
+void test_raw_mutations_preserve_rule_state() {
     using namespace Mockingbird;
 
     constexpr Square d4 = make_square(FILE_D, RANK_4);
@@ -241,6 +426,8 @@ void test_raw_mutations_preserve_en_passant_state() {
         const Color color = Color(color_index);
         position.set_en_passant_square(
           color, EN_PASSANT_SQUARES[std::size_t(color)]);
+        for (const CastlingSide side : CASTLING_SIDES)
+            position.set_castling_right(color, side);
     }
 
     // Raw state mutations do not apply move-rule expiration.
@@ -254,6 +441,9 @@ void test_raw_mutations_preserve_en_passant_state() {
         expect(position.en_passant_square(color)
                  == EN_PASSANT_SQUARES[std::size_t(color)],
                "raw position mutations preserve en-passant targets");
+        for (const CastlingSide side : CASTLING_SIDES)
+            expect(position.has_castling_right(color, side),
+                   "raw position mutations preserve castling rights");
     }
 }
 
@@ -405,6 +595,8 @@ void test_side_to_move_and_clear() {
         const Color color = Color(color_index);
         position.set_en_passant_square(
           color, EN_PASSANT_SQUARES[std::size_t(color)]);
+        for (const CastlingSide side : CASTLING_SIDES)
+            position.set_castling_right(color, side);
     }
     position.clear();
 
@@ -417,6 +609,10 @@ void test_side_to_move_and_clear() {
                "clear resets every color occupancy");
         expect(position.en_passant_square(Color(color_index)) == SQ_NONE,
                "clear resets every en-passant target");
+        for (const CastlingSide side : CASTLING_SIDES)
+            expect(!position.has_castling_right(
+                     Color(color_index), side),
+                   "clear resets every castling right");
     }
 
     for (int type_index = PAWN; type_index <= KING; ++type_index)
@@ -431,7 +627,9 @@ void test_side_to_move_and_clear() {
 int main() {
     test_default_position();
     test_en_passant_state();
-    test_raw_mutations_preserve_en_passant_state();
+    test_every_castling_right_subset();
+    test_castling_right_clearing_and_copying();
+    test_raw_mutations_preserve_rule_state();
     test_all_piece_encodings();
     test_placement_and_removal();
     test_quiet_move();
