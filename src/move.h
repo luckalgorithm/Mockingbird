@@ -24,9 +24,10 @@ enum class MoveType : std::uint8_t {
 //
 //     bits  0..7: destination square
 //     bits 8..15: source square
-//     bits 16..18: promotion PieceType
+//     bits 16..18: promotion PieceType, or NO_PIECE_TYPE
 //     bits 19..20: MoveType
 //
+// Promotion data can accompany PROMOTION and EN_PASSANT moves.
 // Bit 31 distinguishes the null-move token from both board moves and Move::none().
 class Move {
   public:
@@ -63,6 +64,14 @@ class Move {
         return make(from, to, MoveType::EN_PASSANT, NO_PIECE_TYPE);
     }
 
+    // Preconditions: from and to are distinct playable squares, and promotion
+    // is KNIGHT, BISHOP, ROOK, or QUEEN.
+    [[nodiscard]] static constexpr Move en_passant(
+      Square from, Square to, PieceType promotion) noexcept {
+        assert(is_promotion_piece(promotion));
+        return make(from, to, MoveType::EN_PASSANT, promotion);
+    }
+
     [[nodiscard]] constexpr bool is_none() const noexcept {
         return value_ == NONE_VALUE;
     }
@@ -93,10 +102,15 @@ class Move {
         return MoveType((value_ >> TYPE_SHIFT) & TYPE_MASK);
     }
 
-    // Preconditions: this is a promotion move.
+    // Returns true when the move carries a promotion piece type.
+    [[nodiscard]] constexpr bool is_promotion() const noexcept {
+        return ((value_ >> PROMOTION_SHIFT) & PROMOTION_MASK) != 0;
+    }
+
+    // Preconditions: this is a board move that carries a promotion piece type.
     [[nodiscard]] constexpr PieceType promotion_type() const noexcept {
         assert(is_board_move());
-        assert(type() == MoveType::PROMOTION);
+        assert(is_promotion());
         return PieceType((value_ >> PROMOTION_SHIFT) & PROMOTION_MASK);
     }
 
@@ -132,6 +146,12 @@ class Move {
         assert(is_ok(to));
         assert(from != to);
         assert(is_ok(move_type));
+        assert(
+          move_type == MoveType::PROMOTION
+            ? is_promotion_piece(promotion)
+          : move_type == MoveType::EN_PASSANT
+            ? promotion == NO_PIECE_TYPE || is_promotion_piece(promotion)
+            : promotion == NO_PIECE_TYPE);
 
         const auto from_value = static_cast<std::uint32_t>(from);
         const auto to_value = static_cast<std::uint32_t>(to);

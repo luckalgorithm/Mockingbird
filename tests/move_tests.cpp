@@ -32,11 +32,21 @@ constexpr std::array<Mockingbird::PieceType, 4> PROMOTION_TYPES = {
 
     constexpr Square d1 = make_square(FILE_D, RANK_1);
     constexpr Square d2 = make_square(FILE_D, RANK_2);
-    constexpr Move move = Move::promotion(d1, d2, QUEEN);
+    constexpr Move promotion = Move::promotion(d1, d2, QUEEN);
+    constexpr Move en_passant = Move::en_passant(d1, d2);
+    constexpr Move en_passant_promotion =
+      Move::en_passant(d1, d2, KNIGHT);
 
-    return move.is_board_move() && !move.is_none() && !move.is_null()
-        && move.from() == d1 && move.to() == d2
-        && move.type() == MoveType::PROMOTION && move.promotion_type() == QUEEN;
+    return promotion.is_board_move() && !promotion.is_none()
+        && !promotion.is_null() && promotion.from() == d1
+        && promotion.to() == d2
+        && promotion.type() == MoveType::PROMOTION
+        && promotion.is_promotion()
+        && promotion.promotion_type() == QUEEN
+        && !en_passant.is_promotion()
+        && en_passant_promotion.type() == MoveType::EN_PASSANT
+        && en_passant_promotion.is_promotion()
+        && en_passant_promotion.promotion_type() == KNIGHT;
 }
 
 static_assert(constexpr_move_operations());
@@ -70,12 +80,14 @@ void test_sentinels() {
     expect(none.is_none(), "none identifies itself");
     expect(!none.is_null(), "none is distinct from null");
     expect(!none.is_board_move(), "none is not a board move");
+    expect(!none.is_promotion(), "none does not carry a promotion piece");
     expect(!is_ok(none), "none is not a valid board move");
     expect(none.raw() == 0, "none uses the zero encoding");
 
     expect(null.is_null(), "null identifies itself");
     expect(!null.is_none(), "null is distinct from none");
     expect(!null.is_board_move(), "null is not a board move");
+    expect(!null.is_promotion(), "null does not carry a promotion piece");
     expect(!is_ok(null), "null is not a valid board move");
     expect(null.raw() == (std::uint32_t{1} << 31), "null uses bit 31");
     expect(null != none, "null and none have different encodings");
@@ -125,6 +137,12 @@ void test_exhaustive_round_trips() {
             expect_common_fields(normal, from, to, MoveType::NORMAL);
             expect_common_fields(castling, from, to, MoveType::CASTLING);
             expect_common_fields(en_passant, from, to, MoveType::EN_PASSANT);
+            expect(!normal.is_promotion(),
+                   "normal move does not carry a promotion piece");
+            expect(!castling.is_promotion(),
+                   "castling move does not carry a promotion piece");
+            expect(!en_passant.is_promotion(),
+                   "ordinary en-passant move does not carry a promotion piece");
 
             expect(normal != castling, "normal and castling encodings differ");
             expect(normal != en_passant, "normal and en-passant encodings differ");
@@ -132,14 +150,33 @@ void test_exhaustive_round_trips() {
 
             for (const PieceType promotion_type : PROMOTION_TYPES) {
                 const Move promotion = Move::promotion(from, to, promotion_type);
+                const Move en_passant_promotion =
+                  Move::en_passant(from, to, promotion_type);
 
                 expect_common_fields(promotion, from, to, MoveType::PROMOTION);
+                expect(promotion.is_promotion(),
+                       "promotion move carries a promotion piece");
                 expect(promotion.promotion_type() == promotion_type,
                        "promotion piece type round-trips");
+                expect_common_fields(
+                  en_passant_promotion, from, to, MoveType::EN_PASSANT);
+                expect(en_passant_promotion.is_promotion(),
+                       "en-passant promotion carries a promotion piece");
+                expect(en_passant_promotion.promotion_type() == promotion_type,
+                       "en-passant promotion piece type round-trips");
+
                 expect(promotion != normal, "promotion and normal encodings differ");
                 expect(promotion != castling, "promotion and castling encodings differ");
                 expect(promotion != en_passant,
                        "promotion and en-passant encodings differ");
+                expect(en_passant_promotion != normal,
+                       "en-passant promotion and normal encodings differ");
+                expect(en_passant_promotion != castling,
+                       "en-passant promotion and castling encodings differ");
+                expect(en_passant_promotion != en_passant,
+                       "en-passant promotion and ordinary en-passant encodings differ");
+                expect(en_passant_promotion != promotion,
+                       "en-passant promotion and standard promotion encodings differ");
             }
         }
     }
@@ -156,13 +193,24 @@ void test_promotion_encodings_are_distinct() {
     constexpr Square d2 = make_square(FILE_D, RANK_2);
 
     std::array<Move, PROMOTION_TYPES.size()> promotions{};
-    for (std::size_t index = 0; index < PROMOTION_TYPES.size(); ++index)
+    std::array<Move, PROMOTION_TYPES.size()> en_passant_promotions{};
+    for (std::size_t index = 0; index < PROMOTION_TYPES.size(); ++index) {
         promotions[index] = Move::promotion(d1, d2, PROMOTION_TYPES[index]);
+        en_passant_promotions[index] =
+          Move::en_passant(d1, d2, PROMOTION_TYPES[index]);
+    }
 
     for (std::size_t left = 0; left < promotions.size(); ++left) {
-        for (std::size_t right = left + 1; right < promotions.size(); ++right)
+        for (const Move en_passant_promotion : en_passant_promotions)
+            expect(promotions[left] != en_passant_promotion,
+                   "standard and en-passant promotions have different encodings");
+
+        for (std::size_t right = left + 1; right < promotions.size(); ++right) {
             expect(promotions[left] != promotions[right],
-                   "different promotion pieces have different encodings");
+                   "standard promotions encode different piece types distinctly");
+            expect(en_passant_promotions[left] != en_passant_promotions[right],
+                   "en-passant promotions encode different piece types distinctly");
+        }
     }
 }
 
