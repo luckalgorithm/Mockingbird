@@ -63,6 +63,28 @@ static_assert(constexpr_slider_generation());
 
 static_assert(constexpr_king_generation());
 
+[[nodiscard]] constexpr bool constexpr_nonpawn_castling_integration() {
+    using namespace Mockingbird;
+
+    constexpr Square h1 = make_square(FILE_H, RANK_1);
+    constexpr Square j1 = make_square(FILE_J, RANK_1);
+    constexpr Square k1 = make_square(FILE_K, RANK_1);
+
+    Position position;
+    position.set_castling_right(
+      RED, CastlingSide::KING_SIDE);
+    position.put_piece(R_KING, h1);
+    position.put_piece(R_ROOK, k1);
+
+    MoveList moves;
+    generate_nonpawn_moves(position, moves);
+    return !moves.empty()
+        && moves[moves.size() - 1]
+             == Move::castling(h1, j1);
+}
+
+static_assert(constexpr_nonpawn_castling_integration());
+
 [[nodiscard]] Mockingbird::Bitboard destinations_from(
   const Mockingbird::MoveList& moves, Mockingbird::Square source) {
     using namespace Mockingbird;
@@ -689,6 +711,7 @@ void test_combined_nonpawn_generation() {
         generate_rook_moves(position, expected);
         generate_queen_moves(position, expected);
         generate_king_moves(position, expected);
+        generate_castling_moves(position, expected);
 
         MoveList actual;
         actual.push_back(existing);
@@ -697,6 +720,103 @@ void test_combined_nonpawn_generation() {
         expect(move_lists_equal(actual, expected),
                "combined non-pawn generation matches the individual generators");
     }
+}
+
+void test_combined_nonpawn_castling_order() {
+    using namespace Mockingbird;
+
+    for (int color_index = 0;
+         color_index < COLOR_NB;
+         ++color_index) {
+        const Color color = Color(color_index);
+        const CastlingGeometry& kingside =
+          castling_geometry(color, CastlingSide::KING_SIDE);
+        const CastlingGeometry& queenside =
+          castling_geometry(color, CastlingSide::QUEEN_SIDE);
+
+        Position position;
+        position.set_side_to_move(color);
+        position.set_castling_right(
+          color, CastlingSide::KING_SIDE);
+        position.set_castling_right(
+          color, CastlingSide::QUEEN_SIDE);
+        position.put_piece(
+          make_piece(color, KING), kingside.king_source);
+        position.put_piece(
+          make_piece(color, ROOK), kingside.rook_source);
+        position.put_piece(
+          make_piece(color, ROOK), queenside.rook_source);
+
+        MoveList expected;
+        generate_knight_moves(position, expected);
+        generate_bishop_moves(position, expected);
+        generate_rook_moves(position, expected);
+        generate_queen_moves(position, expected);
+        generate_king_moves(position, expected);
+        generate_castling_moves(position, expected);
+
+        MoveList actual;
+        generate_nonpawn_moves(position, actual);
+
+        expect(move_lists_equal(actual, expected),
+               "combined generation matches every non-pawn generator");
+        expect(actual.size() >= 2,
+               "combined generation includes both castling moves");
+        if (actual.size() < 2)
+            continue;
+
+        const std::size_t kingside_index = actual.size() - 2;
+        const std::size_t queenside_index = actual.size() - 1;
+        for (std::size_t index = 0;
+             index < kingside_index;
+             ++index)
+            expect(actual[index].type() != MoveType::CASTLING,
+                   "castling follows every ordinary non-pawn move");
+
+        expect(actual[kingside_index]
+                 == Move::castling(
+                   kingside.king_source,
+                   kingside.king_destination),
+               "combined generation appends kingside castling first");
+        expect(actual[queenside_index]
+                 == Move::castling(
+                   queenside.king_source,
+                   queenside.king_destination),
+               "combined generation appends queenside castling last");
+    }
+}
+
+void test_combined_nonpawn_filters_illegal_castling() {
+    using namespace Mockingbird;
+
+    constexpr Square h1 = make_square(FILE_H, RANK_1);
+    constexpr Square i1 = make_square(FILE_I, RANK_1);
+    constexpr Square k1 = make_square(FILE_K, RANK_1);
+    constexpr Square i4 = make_square(FILE_I, RANK_4);
+
+    Position position;
+    position.set_castling_right(
+      RED, CastlingSide::KING_SIDE);
+    position.put_piece(R_KING, h1);
+    position.put_piece(R_ROOK, k1);
+    position.put_piece(B_ROOK, i4);
+
+    MoveList moves;
+    generate_nonpawn_moves(position, moves);
+
+    bool has_ordinary_transit_move = false;
+    bool has_castling_move = false;
+    for (const Move move : moves) {
+        has_ordinary_transit_move |=
+          move == Move::normal(h1, i1);
+        has_castling_move |=
+          move.type() == MoveType::CASTLING;
+    }
+
+    expect(has_ordinary_transit_move,
+           "ordinary king moves remain pseudo-legal in combined generation");
+    expect(!has_castling_move,
+           "an attacked castling transit is filtered from combined generation");
 }
 
 }  // namespace
@@ -719,6 +839,8 @@ int main() {
     test_multiple_sliders_and_append_behavior();
     test_every_single_slider_blocker();
     test_combined_nonpawn_generation();
+    test_combined_nonpawn_castling_order();
+    test_combined_nonpawn_filters_illegal_castling();
 
     if (failures != 0) {
         std::cerr << failures << " move-generation test(s) failed\n";
