@@ -1,12 +1,33 @@
 #pragma once
 
+#include <array>
+
 #include "attacks.h"
 #include "movelist.h"
+#include "pawns.h"
 #include "position.h"
 
 namespace Mockingbird {
 
 namespace Detail {
+
+inline constexpr std::array<PieceType, 4> PROMOTION_PIECES = {
+  QUEEN,
+  ROOK,
+  BISHOP,
+  KNIGHT,
+};
+
+constexpr void append_pawn_move(
+  Color color, Square from, Square to, MoveList& moves) noexcept {
+    if (!is_pawn_promotion_square(color, to)) {
+        moves.push_back(Move::normal(from, to));
+        return;
+    }
+
+    for (const PieceType promotion : PROMOTION_PIECES)
+        moves.push_back(Move::promotion(from, to, promotion));
+}
 
 template<PieceType Piece>
 [[nodiscard]] constexpr Bitboard sliding_attacks(
@@ -78,6 +99,38 @@ constexpr void generate_king_moves(
 
         while (destinations)
             moves.push_back(Move::normal(from, destinations.pop_lsb()));
+    }
+}
+
+// Appends pseudo-legal pawn pushes, captures, and promotions for the side to
+// move. Double pushes require both traversed squares to be empty. Captures are
+// limited to pieces on the opposing team. En passant, check, and pin constraints
+// are not evaluated.
+// Precondition: moves has enough remaining capacity for the generated moves.
+constexpr void generate_pawn_moves(
+  const Position& position, MoveList& moves) noexcept {
+    const Color us = position.side_to_move();
+    const Bitboard occupied = position.occupied();
+    const Bitboard enemies = occupied & ~position.pieces(team_of(us));
+    Bitboard pawns = position.pieces(us, PAWN);
+
+    while (pawns) {
+        const Square from = pawns.pop_lsb();
+        const Square single = pawn_push_destination(us, from);
+
+        if (single != SQ_NONE && !occupied.test(single)) {
+            Detail::append_pawn_move(us, from, single, moves);
+
+            const Square double_push =
+              pawn_double_push_destination(us, from);
+            if (double_push != SQ_NONE && !occupied.test(double_push))
+                moves.push_back(Move::normal(from, double_push));
+        }
+
+        Bitboard captures = pawn_attacks(us, from) & enemies;
+        while (captures)
+            Detail::append_pawn_move(
+              us, from, captures.pop_lsb(), moves);
     }
 }
 
