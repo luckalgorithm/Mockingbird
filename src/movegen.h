@@ -3,6 +3,7 @@
 #include <array>
 
 #include "attacks.h"
+#include "castling.h"
 #include "movelist.h"
 #include "pawns.h"
 #include "position.h"
@@ -16,6 +17,12 @@ inline constexpr std::array<PieceType, 4> PROMOTION_PIECES = {
   ROOK,
   BISHOP,
   KNIGHT,
+};
+
+inline constexpr std::array<CastlingSide, CASTLING_SIDE_NB>
+  CASTLING_SIDES = {
+    CastlingSide::KING_SIDE,
+    CastlingSide::QUEEN_SIDE,
 };
 
 constexpr void append_pawn_move(
@@ -158,6 +165,25 @@ constexpr void generate_king_moves(
 
         while (destinations)
             moves.push_back(Move::normal(from, destinations.pop_lsb()));
+    }
+}
+
+// Appends legal castling moves for the side to move. Kingside precedes
+// queenside when both moves are legal. At most two moves are appended.
+// The position is not modified.
+// Precondition: moves has enough remaining capacity for the generated moves.
+constexpr void generate_castling_moves(
+  const Position& position, MoveList& moves) noexcept {
+    const Color color = position.side_to_move();
+
+    for (const CastlingSide side : Detail::CASTLING_SIDES) {
+        if (!is_castling_legal(position, side))
+            continue;
+
+        const CastlingGeometry& geometry =
+          castling_geometry(color, side);
+        moves.push_back(Move::castling(
+          geometry.king_source, geometry.king_destination));
     }
 }
 

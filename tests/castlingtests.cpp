@@ -1,4 +1,5 @@
 #include "castling.h"
+#include "movegen.h"
 
 #include <array>
 #include <cstddef>
@@ -32,6 +33,12 @@ struct GeometryCase {
 };
 
 using namespace Mockingbird;
+
+inline constexpr std::array<CastlingSide, CASTLING_SIDE_NB>
+  CASTLING_SIDES = {
+    CastlingSide::KING_SIDE,
+    CastlingSide::QUEEN_SIDE,
+};
 
 inline constexpr std::array<GeometryCase, 8> GEOMETRY_CASES = {{
   {
@@ -204,6 +211,28 @@ static_assert(exact_geometries_match());
     return position;
 }
 
+[[nodiscard]] constexpr Position both_sides_position(
+  Color color) noexcept {
+    const CastlingGeometry& kingside =
+      castling_geometry(color, CastlingSide::KING_SIDE);
+    const CastlingGeometry& queenside =
+      castling_geometry(color, CastlingSide::QUEEN_SIDE);
+
+    Position position;
+    position.set_side_to_move(color);
+    position.set_castling_right(
+      color, CastlingSide::KING_SIDE);
+    position.set_castling_right(
+      color, CastlingSide::QUEEN_SIDE);
+    position.put_piece(
+      make_piece(color, KING), kingside.king_source);
+    position.put_piece(
+      make_piece(color, ROOK), kingside.rook_source);
+    position.put_piece(
+      make_piece(color, ROOK), queenside.rook_source);
+    return position;
+}
+
 [[nodiscard]] constexpr bool constexpr_legality_cases() noexcept {
     const GeometryCase& test_case = GEOMETRY_CASES[0];
     Position position = baseline_position(test_case);
@@ -226,6 +255,25 @@ static_assert(exact_geometries_match());
 
 static_assert(constexpr_legality_cases());
 
+[[nodiscard]] constexpr bool constexpr_castling_generation() noexcept {
+    Position position = both_sides_position(RED);
+    MoveList moves;
+    generate_castling_moves(position, moves);
+
+    const CastlingGeometry& kingside =
+      castling_geometry(RED, CastlingSide::KING_SIDE);
+    const CastlingGeometry& queenside =
+      castling_geometry(RED, CastlingSide::QUEEN_SIDE);
+
+    return moves.size() == 2
+        && moves[0] == Move::castling(
+          kingside.king_source, kingside.king_destination)
+        && moves[1] == Move::castling(
+          queenside.king_source, queenside.king_destination);
+}
+
+static_assert(constexpr_castling_generation());
+
 [[nodiscard]] constexpr Team opposing_team(Color color) noexcept {
     return team_of(color) == RED_YELLOW
       ? BLUE_GREEN
@@ -237,6 +285,48 @@ static_assert(constexpr_legality_cases());
     return team == RED_YELLOW
       ? std::array<Color, 2>{RED, YELLOW}
       : std::array<Color, 2>{BLUE, GREEN};
+}
+
+[[nodiscard]] bool positions_equal(
+  const Position& left, const Position& right) {
+    if (left.side_to_move() != right.side_to_move()
+        || left.occupied() != right.occupied())
+        return false;
+
+    for (int color_index = 0;
+         color_index < COLOR_NB;
+         ++color_index) {
+        const Color color = Color(color_index);
+        if (left.pieces(color) != right.pieces(color)
+            || left.en_passant_square(color)
+                 != right.en_passant_square(color))
+            return false;
+
+        for (const CastlingSide side : CASTLING_SIDES) {
+            if (left.has_castling_right(color, side)
+                  != right.has_castling_right(color, side))
+                return false;
+        }
+    }
+
+    for (int type_index = PAWN;
+         type_index <= KING;
+         ++type_index) {
+        if (left.pieces(PieceType(type_index))
+              != right.pieces(PieceType(type_index)))
+            return false;
+    }
+
+    for (int square_index = 0;
+         square_index < SQUARE_NB;
+         ++square_index) {
+        const Square square = Square(square_index);
+        if (is_ok(square)
+            && left.piece_on(square) != right.piece_on(square))
+            return false;
+    }
+
+    return true;
 }
 
 [[nodiscard]] constexpr bool piece_attacks(
@@ -655,6 +745,262 @@ void test_independent_sides() {
            "a kingside blocker preserves queenside castling");
 }
 
+void test_generation_for_every_geometry() {
+    for (const GeometryCase& test_case : GEOMETRY_CASES) {
+        const Position position =
+          baseline_position(test_case);
+        MoveList moves;
+        generate_castling_moves(position, moves);
+
+        expect(moves.size() == 1,
+               "one legal castling side generates one move");
+
+        Position stale;
+        stale.set_side_to_move(test_case.color);
+        stale.set_castling_right(
+          test_case.color, test_case.side);
+        MoveList stale_moves;
+        generate_castling_moves(stale, stale_moves);
+        expect(stale_moves.empty(),
+               "a stale castling right generates no move");
+        expect(stale.has_castling_right(
+                 test_case.color, test_case.side),
+               "generation does not clear a stale castling right");
+
+        if (moves.size() != 1)
+            continue;
+
+        expect(moves[0] == Move::castling(
+                 test_case.king_source,
+                 test_case.king_destination),
+               "castling generation uses the canonical king move");
+        expect(moves[0].type() == MoveType::CASTLING,
+               "generated castling uses the castling move type");
+        expect(!moves[0].is_promotion(),
+               "generated castling carries no promotion data");
+    }
+}
+
+void test_generation_order_and_append_behavior() {
+    constexpr Move existing = Move::normal(
+      make_square(FILE_H, RANK_8),
+      make_square(FILE_H, RANK_9));
+
+    for (int color_index = 0;
+         color_index < COLOR_NB;
+         ++color_index) {
+        const Color color = Color(color_index);
+        const Position position =
+          both_sides_position(color);
+        const CastlingGeometry& kingside =
+          castling_geometry(color, CastlingSide::KING_SIDE);
+        const CastlingGeometry& queenside =
+          castling_geometry(color, CastlingSide::QUEEN_SIDE);
+
+        MoveList moves;
+        moves.push_back(existing);
+        generate_castling_moves(position, moves);
+
+        expect(moves.size() == 3,
+               "two castling moves append to an existing list");
+        if (moves.size() != 3)
+            continue;
+
+        expect(moves[0] == existing,
+               "castling generation preserves existing moves");
+        expect(moves[1] == Move::castling(
+                 kingside.king_source,
+                 kingside.king_destination),
+               "kingside castling is generated first");
+        expect(moves[2] == Move::castling(
+                 queenside.king_source,
+                 queenside.king_destination),
+               "queenside castling is generated second");
+
+        generate_castling_moves(position, moves);
+        expect(moves.size() == 5,
+               "repeated generation appends another two moves");
+        if (moves.size() == 5) {
+            expect(moves[3] == moves[1]
+                     && moves[4] == moves[2],
+                   "repeated generation preserves castling order");
+        }
+    }
+}
+
+void test_generation_filters_illegal_sides() {
+    Position empty;
+    MoveList empty_moves;
+    generate_castling_moves(empty, empty_moves);
+    expect(empty_moves.empty(),
+           "an empty position generates no castling moves");
+
+    for (int color_index = 0;
+         color_index < COLOR_NB;
+         ++color_index) {
+        const Color color = Color(color_index);
+        const CastlingGeometry& kingside =
+          castling_geometry(color, CastlingSide::KING_SIDE);
+        const CastlingGeometry& queenside =
+          castling_geometry(color, CastlingSide::QUEEN_SIDE);
+
+        Position kingside_blocked =
+          both_sides_position(color);
+        kingside_blocked.put_piece(
+          make_piece(color, KNIGHT),
+          kingside.required_empty.lsb());
+        MoveList queenside_only;
+        generate_castling_moves(
+          kingside_blocked, queenside_only);
+
+        expect(queenside_only.size() == 1
+                 && queenside_only[0] == Move::castling(
+                   queenside.king_source,
+                   queenside.king_destination),
+               "an illegal kingside leaves only queenside castling");
+
+        Position queenside_blocked =
+          both_sides_position(color);
+        queenside_blocked.put_piece(
+          make_piece(color, KNIGHT),
+          queenside.required_empty.lsb());
+        MoveList kingside_only;
+        generate_castling_moves(
+          queenside_blocked, kingside_only);
+
+        expect(kingside_only.size() == 1
+                 && kingside_only[0] == Move::castling(
+                   kingside.king_source,
+                   kingside.king_destination),
+               "an illegal queenside leaves only kingside castling");
+
+        Position no_rights =
+          both_sides_position(color);
+        no_rights.clear_castling_rights(color);
+        for (int other_index = 0;
+             other_index < COLOR_NB;
+             ++other_index) {
+            const Color other = Color(other_index);
+            if (other == color)
+                continue;
+
+            for (const CastlingSide side : CASTLING_SIDES)
+                no_rights.set_castling_right(other, side);
+        }
+
+        MoveList no_right_moves;
+        generate_castling_moves(no_rights, no_right_moves);
+        expect(no_right_moves.empty(),
+               "only the current color's castling rights are used");
+    }
+}
+
+void test_generation_rejects_attacked_paths() {
+    for (const GeometryCase& test_case : GEOMETRY_CASES) {
+        const CastlingGeometry& geometry =
+          castling_geometry(test_case.color, test_case.side);
+        Position position = baseline_position(test_case);
+        const Color enemy =
+          team_colors(opposing_team(test_case.color))[0];
+        const Square attacker =
+          find_isolated_attacker(
+            position,
+            geometry,
+            enemy,
+            ROOK,
+            1);
+
+        expect(attacker != SQ_NONE,
+               "a castling-transit attack fixture exists");
+        if (attacker == SQ_NONE)
+            continue;
+
+        position.put_piece(
+          make_piece(enemy, ROOK), attacker);
+        MoveList moves;
+        generate_castling_moves(position, moves);
+        expect(moves.empty(),
+               "an attacked king transit generates no castling move");
+    }
+}
+
+void test_generation_does_not_modify_position() {
+    for (int color_index = 0;
+         color_index < COLOR_NB;
+         ++color_index) {
+        const Color color = Color(color_index);
+        Position position = both_sides_position(color);
+        for (int state_color_index = 0;
+             state_color_index < COLOR_NB;
+             ++state_color_index) {
+            const Color state_color = Color(state_color_index);
+            for (const CastlingSide side : CASTLING_SIDES)
+                position.set_castling_right(state_color, side);
+
+            position.set_en_passant_square(
+              state_color,
+              make_square(
+                File(FILE_D + state_color_index),
+                Rank(RANK_4 + state_color_index)));
+        }
+
+        const Position before = position;
+
+        MoveList moves;
+        generate_castling_moves(position, moves);
+        expect(positions_equal(position, before),
+               "castling generation leaves every position field unchanged");
+    }
+}
+
+void test_generation_capacity_boundary() {
+    constexpr Move filler = Move::normal(
+      make_square(FILE_H, RANK_8),
+      make_square(FILE_H, RANK_9));
+
+    const Position both = both_sides_position(RED);
+    const CastlingGeometry& red_kingside =
+      castling_geometry(RED, CastlingSide::KING_SIDE);
+    const CastlingGeometry& red_queenside =
+      castling_geometry(RED, CastlingSide::QUEEN_SIDE);
+    MoveList two_spaces;
+    while (two_spaces.size() < two_spaces.capacity() - 2)
+        two_spaces.push_back(filler);
+
+    generate_castling_moves(both, two_spaces);
+    expect(two_spaces.full(),
+           "two legal castles exactly fill two remaining slots");
+    if (two_spaces.full()) {
+        expect(two_spaces[two_spaces.capacity() - 2]
+                 == Move::castling(
+                   red_kingside.king_source,
+                   red_kingside.king_destination)
+                 && two_spaces[two_spaces.capacity() - 1]
+                      == Move::castling(
+                        red_queenside.king_source,
+                        red_queenside.king_destination),
+               "capacity-boundary generation retains castling order");
+    }
+
+    const GeometryCase& queenside_case = GEOMETRY_CASES[1];
+    const Position queenside_only =
+      baseline_position(queenside_case);
+    MoveList one_space;
+    while (one_space.size() < one_space.capacity() - 1)
+        one_space.push_back(filler);
+
+    generate_castling_moves(queenside_only, one_space);
+    expect(one_space.full(),
+           "one legal castle exactly fills one remaining slot");
+    if (one_space.full()) {
+        expect(one_space[one_space.capacity() - 1]
+                 == Move::castling(
+                   queenside_case.king_source,
+                   queenside_case.king_destination),
+               "queenside-only generation uses the next available slot");
+    }
+}
+
 }  // namespace
 
 int main() {
@@ -666,6 +1012,12 @@ int main() {
     test_slider_blockers();
     test_irrelevant_attacked_squares();
     test_independent_sides();
+    test_generation_for_every_geometry();
+    test_generation_order_and_append_behavior();
+    test_generation_filters_illegal_sides();
+    test_generation_rejects_attacked_paths();
+    test_generation_does_not_modify_position();
+    test_generation_capacity_boundary();
 
     if (failures != 0) {
         std::cerr << failures << " castling test(s) failed\n";
