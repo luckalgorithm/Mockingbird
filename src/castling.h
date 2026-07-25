@@ -5,8 +5,7 @@
 #include <cstddef>
 #include <utility>
 
-#include "attacks.h"
-#include "position.h"
+#include "checks.h"
 
 namespace Mockingbird {
 
@@ -142,54 +141,6 @@ inline constexpr auto CASTLING_GEOMETRIES =
     return true;
 }
 
-// occupied supplies the blockers used for sliding-piece attacks.
-// Preconditions: square is playable and attacking_team is valid.
-[[nodiscard]] constexpr bool is_square_attacked_by_team(
-  const Position& position,
-  Square square,
-  Team attacking_team,
-  const Bitboard& occupied) noexcept {
-    assert(is_ok(square));
-    assert(is_ok(attacking_team));
-
-    for (int color_index = 0; color_index < COLOR_NB; ++color_index) {
-        const Color color = Color(color_index);
-        if (team_of(color) != attacking_team)
-            continue;
-
-        // Reversing a pawn's capture direction maps a target to its sources.
-        const Color reverse = next_color(next_color(color));
-        if (pawn_attacks(reverse, square)
-            & position.pieces(color, PAWN))
-            return true;
-    }
-
-    const Bitboard attacking_pieces =
-      position.pieces(attacking_team);
-
-    if (knight_attacks(square)
-          & attacking_pieces
-          & position.pieces(KNIGHT))
-        return true;
-
-    if (king_attacks(square)
-          & attacking_pieces
-          & position.pieces(KING))
-        return true;
-
-    const Bitboard rook_or_queen =
-      attacking_pieces
-      & (position.pieces(ROOK) | position.pieces(QUEEN));
-    if (rook_attacks(square, occupied) & rook_or_queen)
-        return true;
-
-    const Bitboard bishop_or_queen =
-      attacking_pieces
-      & (position.pieces(BISHOP) | position.pieces(QUEEN));
-    return bool(bishop_attacks(square, occupied)
-                & bishop_or_queen);
-}
-
 }  // namespace Detail
 
 // Preconditions: color and side are valid.
@@ -225,22 +176,22 @@ inline constexpr auto CASTLING_GEOMETRIES =
     if (occupied & geometry.required_empty)
         return false;
 
-    const Team opposing_team =
-      team_of(color) == RED_YELLOW ? BLUE_GREEN : RED_YELLOW;
-    if (Detail::is_square_attacked_by_team(
+    const Team opponents =
+      Detail::opposing_team(team_of(color));
+    if (is_square_attacked_by_team(
           position,
           geometry.king_source,
-          opposing_team,
+          opponents,
           occupied))
         return false;
 
     // The king source no longer blocks attacks after the king starts moving.
     Bitboard transit_occupancy = occupied;
     transit_occupancy.clear(geometry.king_source);
-    if (Detail::is_square_attacked_by_team(
+    if (is_square_attacked_by_team(
           position,
           geometry.king_transit,
-          opposing_team,
+          opponents,
           transit_occupancy))
         return false;
 
@@ -248,10 +199,10 @@ inline constexpr auto CASTLING_GEOMETRIES =
     Bitboard destination_occupancy = transit_occupancy;
     destination_occupancy.clear(geometry.rook_source);
     destination_occupancy.set(geometry.rook_destination);
-    return !Detail::is_square_attacked_by_team(
+    return !is_square_attacked_by_team(
       position,
       geometry.king_destination,
-      opposing_team,
+      opponents,
       destination_occupancy);
 }
 
