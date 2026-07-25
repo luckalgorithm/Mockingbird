@@ -28,7 +28,7 @@ inline constexpr std::array<CastlingSide, CASTLING_SIDE_NB>
     CastlingSide::QUEEN_SIDE,
 };
 
-// These counts were produced by reference_perft()'s copy-per-child traversal.
+// These counts were produced by copy_perft().
 inline constexpr std::array<std::uint64_t, 4>
   SPECIAL_REGRESSION_COUNTS = {
     1,
@@ -41,15 +41,6 @@ inline constexpr std::array<std::uint64_t, 2>
   KING_CAPTURE_REGRESSION_COUNTS = {
     21,
     149,
-};
-
-// Fixed perft counts for starting_position().
-inline constexpr std::array<std::uint64_t, 4>
-  START_REGRESSION_COUNTS = {
-    20,
-    395,
-    7800,
-    152050,
 };
 
 [[nodiscard]] constexpr bool positions_equal(
@@ -118,9 +109,9 @@ inline constexpr std::array<std::uint64_t, 4>
     return false;
 }
 
-// Each child is traversed in a separate Position copy. The reference does not
+// Each child is traversed in a separate Position copy. This traversal does not
 // use perft() or undo_move().
-[[nodiscard]] std::uint64_t reference_perft(
+[[nodiscard]] std::uint64_t copy_perft(
   const Position& position,
   int depth) {
     if (depth == 0)
@@ -135,7 +126,7 @@ inline constexpr std::array<std::uint64_t, 4>
         Position child = position;
         UndoState unused;
         do_move(child, move, unused);
-        nodes += reference_perft(child, depth - 1);
+        nodes += copy_perft(child, depth - 1);
     }
 
     return nodes;
@@ -362,13 +353,13 @@ void test_depth_zero_and_one() {
            "depth-one perft preserves the position");
 }
 
-void test_copy_reference_and_restoration() {
+void test_copy_traversal_and_restoration() {
     Position position = special_position();
     const Position original = position;
 
     for (int depth = 0; depth <= 3; ++depth) {
         const std::uint64_t expected =
-          reference_perft(original, depth);
+          copy_perft(original, depth);
         const std::uint64_t actual =
           perft(position, depth);
 
@@ -378,7 +369,7 @@ void test_copy_reference_and_restoration() {
                  std::size_t(depth)],
           "copy traversal matches the special-position regression count");
         expect(actual == expected,
-               "perft matches copy-based reference traversal");
+               "perft matches copy-based traversal");
         expect(positions_equal(position, original),
                "perft restores all position state");
     }
@@ -461,7 +452,7 @@ void test_terminal_king_capture() {
 
     for (int depth = 1; depth <= 2; ++depth) {
         const std::uint64_t expected =
-          reference_perft(original, depth);
+          copy_perft(original, depth);
         expect(
           expected
             == KING_CAPTURE_REGRESSION_COUNTS[
@@ -479,17 +470,17 @@ void test_terminal_king_capture() {
 void test_rotational_symmetry() {
     Position position = special_position();
     const std::uint64_t expected_depth_one =
-      reference_perft(position, 1);
+      copy_perft(position, 1);
     const std::uint64_t expected_depth_two =
-      reference_perft(position, 2);
+      copy_perft(position, 2);
 
     for (int rotation = 0; rotation < COLOR_NB; ++rotation) {
         const Position original = position;
 
         expect(
-          reference_perft(position, 1)
+          copy_perft(position, 1)
               == expected_depth_one
-            && reference_perft(position, 2)
+            && copy_perft(position, 2)
                  == expected_depth_two,
           "copy-based counts are invariant under rotation");
         expect(perft(position, 1) == expected_depth_one
@@ -502,19 +493,18 @@ void test_rotational_symmetry() {
     }
 }
 
-void test_starting_position_regression() {
+void test_starting_position_copy_traversal() {
     Position position = starting_position();
     const Position original = position;
 
     for (int depth = 1; depth <= 4; ++depth) {
-        const std::uint64_t nodes =
+        const std::uint64_t expected =
+          copy_perft(original, depth);
+        const std::uint64_t actual =
           perft(position, depth);
 
-        expect(
-          nodes
-            == START_REGRESSION_COUNTS[
-                 std::size_t(depth - 1)],
-          "starting-position perft matches the regression count");
+        expect(actual == expected,
+               "starting-position perft matches copy traversal");
         expect(positions_equal(position, original),
                "starting-position perft restores all state");
     }
@@ -524,11 +514,11 @@ void test_starting_position_regression() {
 
 int main() {
     test_depth_zero_and_one();
-    test_copy_reference_and_restoration();
+    test_copy_traversal_and_restoration();
     test_special_move_branches();
     test_terminal_king_capture();
     test_rotational_symmetry();
-    test_starting_position_regression();
+    test_starting_position_copy_traversal();
 
     if (failures != 0) {
         std::cerr << failures
