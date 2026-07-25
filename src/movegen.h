@@ -291,4 +291,16 @@ constexpr void generate_nonpawn_moves(
     generate_castling_moves(position, moves);
 }
 
+// Appends pawn, knight, bishop, rook, queen, ordinary king, kingside castling,
+// and queenside castling moves in that order. Pawn and ordinary non-pawn moves
+// are pseudo-legal: check, pins, and attacked king destinations are not
+// evaluated. Castling evaluates its required king-path attacks. The position
+// is not modified.
+// Precondition: moves has enough remaining capacity for the generated moves.
+constexpr void generate_moves(
+  const Position& position, MoveList& moves) noexcept {
+    generate_pawn_moves(position, moves);
+    generate_nonpawn_moves(position, moves);
+}
+
 }  // namespace Mockingbird

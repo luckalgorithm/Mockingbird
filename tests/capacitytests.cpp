@@ -152,7 +152,7 @@ inline constexpr Mockingbird::Square KING_SQUARE =
 
 [[nodiscard]] constexpr std::size_t high_mobility_move_count() {
     Mockingbird::MoveList moves;
-    Mockingbird::generate_nonpawn_moves(
+    Mockingbird::generate_moves(
       make_high_mobility_position(), moves);
     return moves.size();
 }
@@ -182,8 +182,7 @@ void test_high_mobility_position() {
 
     const Position position = make_high_mobility_position();
     MoveList moves;
-    generate_pawn_moves(position, moves);
-    generate_nonpawn_moves(position, moves);
+    generate_moves(position, moves);
 
     expect(moves.size() == 449,
            "promotion-heavy position generates 449 moves");

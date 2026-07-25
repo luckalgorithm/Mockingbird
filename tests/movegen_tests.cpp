@@ -85,6 +85,41 @@ static_assert(constexpr_king_generation());
 
 static_assert(constexpr_nonpawn_castling_integration());
 
+[[nodiscard]] constexpr bool constexpr_all_move_generation() {
+    using namespace Mockingbird;
+
+    constexpr Square f6 = make_square(FILE_F, RANK_6);
+    constexpr Square h8 = make_square(FILE_H, RANK_8);
+    constexpr Square h9 = make_square(FILE_H, RANK_9);
+
+    Position position;
+    position.put_piece(R_PAWN, h8);
+    position.put_piece(R_KNIGHT, f6);
+
+    MoveList expected;
+    generate_pawn_moves(position, expected);
+    const std::size_t pawn_move_count = expected.size();
+    generate_nonpawn_moves(position, expected);
+
+    MoveList actual;
+    generate_moves(position, actual);
+
+    if (actual.size() != expected.size()
+        || pawn_move_count != 1
+        || actual[0] != Move::normal(h8, h9)
+        || actual[pawn_move_count].from() != f6)
+        return false;
+
+    for (std::size_t index = 0; index < actual.size(); ++index) {
+        if (actual[index] != expected[index])
+            return false;
+    }
+
+    return true;
+}
+
+static_assert(constexpr_all_move_generation());
+
 [[nodiscard]] Mockingbird::Bitboard destinations_from(
   const Mockingbird::MoveList& moves, Mockingbird::Square source) {
     using namespace Mockingbird;
@@ -819,6 +854,134 @@ void test_combined_nonpawn_filters_illegal_castling() {
            "an attacked castling transit is filtered from combined generation");
 }
 
+void test_combined_all_move_generation() {
+    using namespace Mockingbird;
+
+    constexpr Square pawn_source =
+      make_square(FILE_H, RANK_8);
+    constexpr Square knight_source =
+      make_square(FILE_E, RANK_6);
+    constexpr Square bishop_source =
+      make_square(FILE_F, RANK_8);
+    constexpr Square queen_source =
+      make_square(FILE_I, RANK_6);
+    constexpr Move existing = Move::normal(
+      make_square(FILE_D, RANK_5),
+      make_square(FILE_D, RANK_6));
+
+    for (int color_index = 0;
+         color_index < COLOR_NB;
+         ++color_index) {
+        const Color color = Color(color_index);
+        const CastlingGeometry& kingside =
+          castling_geometry(color, CastlingSide::KING_SIDE);
+        const CastlingGeometry& queenside =
+          castling_geometry(color, CastlingSide::QUEEN_SIDE);
+
+        Position position;
+        position.set_side_to_move(color);
+        position.set_castling_right(
+          color, CastlingSide::KING_SIDE);
+        position.set_castling_right(
+          color, CastlingSide::QUEEN_SIDE);
+        position.put_piece(
+          make_piece(color, PAWN), pawn_source);
+        position.put_piece(
+          make_piece(color, KNIGHT), knight_source);
+        position.put_piece(
+          make_piece(color, BISHOP), bishop_source);
+        position.put_piece(
+          make_piece(color, QUEEN), queen_source);
+        position.put_piece(
+          make_piece(color, KING), kingside.king_source);
+        position.put_piece(
+          make_piece(color, ROOK), kingside.rook_source);
+        position.put_piece(
+          make_piece(color, ROOK), queenside.rook_source);
+
+        MoveList expected;
+        expected.push_back(existing);
+        generate_pawn_moves(position, expected);
+        generate_nonpawn_moves(position, expected);
+
+        MoveList actual;
+        actual.push_back(existing);
+        generate_moves(position, actual);
+
+        expect(move_lists_equal(actual, expected),
+               "all-move generation matches both component generators");
+        expect(actual[0] == existing,
+               "all-move generation preserves existing moves");
+        expect(actual.size() >= 4,
+               "all-move generation includes a pawn and both castles");
+        if (actual.size() < 4)
+            continue;
+
+        expect(actual[1]
+                 == Move::normal(
+                   pawn_source,
+                   pawn_push_destination(color, pawn_source)),
+               "pawn moves immediately follow existing moves");
+        expect(actual[actual.size() - 2]
+                 == Move::castling(
+                   kingside.king_source,
+                   kingside.king_destination),
+               "kingside castling is the penultimate aggregate move");
+        expect(actual[actual.size() - 1]
+                 == Move::castling(
+                   queenside.king_source,
+                   queenside.king_destination),
+               "queenside castling is the final aggregate move");
+    }
+}
+
+void test_combined_all_move_special_pawns() {
+    using namespace Mockingbird;
+
+    constexpr Square a11 = make_square(FILE_A, RANK_11);
+    constexpr Square b10 = make_square(FILE_B, RANK_10);
+    constexpr Square b11 = make_square(FILE_B, RANK_11);
+    constexpr Square c11 = make_square(FILE_C, RANK_11);
+    constexpr Square d11 = make_square(FILE_D, RANK_11);
+    constexpr Square h8 = make_square(FILE_H, RANK_8);
+
+    Position position;
+    position.put_piece(R_PAWN, b10);
+    position.put_piece(R_KNIGHT, h8);
+    position.put_piece(G_ROOK, a11);
+    position.put_piece(B_PAWN, d11);
+    position.set_en_passant_square(BLUE, c11);
+
+    MoveList pawn_moves;
+    generate_pawn_moves(position, pawn_moves);
+
+    MoveList expected;
+    generate_pawn_moves(position, expected);
+    generate_nonpawn_moves(position, expected);
+
+    MoveList actual;
+    generate_moves(position, actual);
+
+    expect(pawn_moves.size() == 12,
+           "special pawn fixture generates twelve promotion moves");
+    expect(move_lists_equal(actual, expected),
+           "aggregate generation preserves promotion and en-passant moves");
+    expect(actual.size() > pawn_moves.size(),
+           "non-pawn moves follow the special pawn moves");
+    if (pawn_moves.size() != 12 || actual.size() <= pawn_moves.size())
+        return;
+
+    expect(actual[0] == Move::promotion(b10, b11, QUEEN),
+           "quiet promotions begin the aggregate list");
+    expect(actual[4] == Move::promotion(b10, a11, QUEEN),
+           "ordinary capture promotions follow quiet promotions");
+    expect(actual[8]
+             == Move::en_passant(b10, c11, QUEEN),
+           "en-passant promotions follow ordinary pawn moves");
+    expect(actual[pawn_moves.size()].from() == h8,
+           "non-pawn generation begins after every pawn move");
+}
+
 }  // namespace
 
 int main() {
@@ -841,6 +1004,8 @@ int main() {
     test_combined_nonpawn_generation();
     test_combined_nonpawn_castling_order();
     test_combined_nonpawn_filters_illegal_castling();
+    test_combined_all_move_generation();
+    test_combined_all_move_special_pawns();
 
     if (failures != 0) {
         std::cerr << failures << " move-generation test(s) failed\n";
