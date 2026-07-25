@@ -109,6 +109,26 @@ inline constexpr std::array<std::uint64_t, 2>
     return false;
 }
 
+[[nodiscard]] constexpr const PerftEntry* find_entry(
+  const PerftList& entries,
+  Move target) noexcept {
+    for (const PerftEntry& entry : entries) {
+        if (entry.move == target)
+            return &entry;
+    }
+
+    return nullptr;
+}
+
+[[nodiscard]] constexpr std::uint64_t sum_nodes(
+  const PerftList& entries) noexcept {
+    std::uint64_t nodes = 0;
+    for (const PerftEntry& entry : entries)
+        nodes += entry.nodes;
+
+    return nodes;
+}
+
 // Each child is traversed in a separate Position copy. This traversal does not
 // use perft() or undo_move().
 [[nodiscard]] std::uint64_t copy_perft(
@@ -510,6 +530,235 @@ void test_starting_position_copy_traversal() {
     }
 }
 
+void test_divide_base_depth_and_order() {
+    Position position = special_position();
+    const Position original = position;
+
+    const PerftList depth_zero =
+      perft_divide(position, 0);
+    expect(depth_zero.empty(),
+           "depth-zero divide has no root-move entries");
+    expect(positions_equal(position, original),
+           "depth-zero divide preserves all position state");
+
+    Position generator = position;
+    MoveList legal_moves;
+    generate_legal_moves(generator, legal_moves);
+
+    const PerftList entries =
+      perft_divide(position, 1);
+
+    expect(entries.size() == legal_moves.size(),
+           "depth-one divide contains every legal root move");
+
+    bool exact_order =
+      entries.size() == legal_moves.size();
+    bool unit_counts = true;
+    for (std::size_t index = 0;
+         index < entries.size();
+         ++index) {
+        exact_order &=
+          entries[index].move == legal_moves[index];
+        unit_counts &= entries[index].nodes == 1;
+    }
+
+    expect(exact_order,
+           "divide preserves legal-move generation order");
+    expect(unit_counts,
+           "every depth-one divide entry contains one node");
+    expect(
+      sum_nodes(entries) == perft(position, 1),
+      "depth-one divide sum equals perft");
+    expect(positions_equal(position, original),
+           "depth-one divide preserves all position state");
+}
+
+void test_divide_copy_counts_and_sums() {
+    Position position = special_position();
+    const Position original = position;
+
+    Position generator = original;
+    MoveList legal_moves;
+    generate_legal_moves(generator, legal_moves);
+
+    for (int depth = 1; depth <= 3; ++depth) {
+        const PerftList entries =
+          perft_divide(position, depth);
+
+        bool exact_entries =
+          entries.size() == legal_moves.size();
+        for (std::size_t index = 0;
+             index < entries.size();
+             ++index) {
+            if (index >= legal_moves.size()) {
+                exact_entries = false;
+                break;
+            }
+
+            const PerftEntry& entry = entries[index];
+            if (entry.move != legal_moves[index])
+                exact_entries = false;
+
+            Position child = original;
+            UndoState unused;
+            do_move(child, entry.move, unused);
+            if (entry.nodes
+                != copy_perft(child, depth - 1))
+                exact_entries = false;
+        }
+
+        expect(
+          exact_entries,
+          "every divide entry matches copy-per-child traversal");
+        expect(
+          sum_nodes(entries) == perft(position, depth),
+          "divide sum equals perft through depth three");
+        expect(positions_equal(position, original),
+               "divide restores the special position");
+    }
+}
+
+void test_divide_special_moves() {
+    Position position = special_position();
+    const Position original = position;
+    const PerftList entries =
+      perft_divide(position, 2);
+
+    const CastlingGeometry& kingside =
+      castling_geometry(RED, CastlingSide::KING_SIDE);
+    const CastlingGeometry& queenside =
+      castling_geometry(RED, CastlingSide::QUEEN_SIDE);
+
+    expect(
+      find_entry(
+        entries,
+        Move::castling(
+          kingside.king_source,
+          kingside.king_destination))
+        != nullptr,
+      "divide contains kingside castling");
+    expect(
+      find_entry(
+        entries,
+        Move::castling(
+          queenside.king_source,
+          queenside.king_destination))
+        != nullptr,
+      "divide contains queenside castling");
+    expect(
+      find_entry(
+        entries,
+        Move::en_passant(
+          make_square(FILE_D, RANK_5),
+          make_square(FILE_C, RANK_6)))
+        != nullptr,
+      "divide contains en passant");
+
+    bool all_promotions_present = true;
+    for (const PieceType promotion :
+         std::array{QUEEN, ROOK, BISHOP, KNIGHT}) {
+        all_promotions_present &=
+          find_entry(
+            entries,
+            Move::promotion(
+              make_square(FILE_B, RANK_10),
+              make_square(FILE_B, RANK_11),
+              promotion))
+          != nullptr;
+        all_promotions_present &=
+          find_entry(
+            entries,
+            Move::promotion(
+              make_square(FILE_B, RANK_10),
+              make_square(FILE_C, RANK_11),
+              promotion))
+          != nullptr;
+    }
+
+    expect(all_promotions_present,
+           "divide contains every quiet and capture promotion");
+    expect(positions_equal(position, original),
+           "special-move divide restores all position state");
+}
+
+void test_divide_terminal_capture() {
+    constexpr Move capture = Move::normal(
+      make_square(FILE_F, RANK_5),
+      make_square(FILE_F, RANK_8));
+
+    Position position = king_capture_position();
+    const Position original = position;
+
+    const PerftList horizon =
+      perft_divide(position, 1);
+    const PerftEntry* horizon_capture =
+      find_entry(horizon, capture);
+    expect(horizon_capture != nullptr
+             && horizon_capture->nodes == 1,
+           "king capture counts at the depth-one horizon");
+    expect(positions_equal(position, original),
+           "depth-one king-capture divide restores the position");
+
+    const PerftList continued =
+      perft_divide(position, 2);
+    const PerftEntry* continued_capture =
+      find_entry(continued, capture);
+    expect(continued_capture != nullptr
+             && continued_capture->nodes == 0,
+           "king capture has no continuation before the horizon");
+    expect(
+      sum_nodes(continued) == perft(position, 2),
+      "king-capture divide sum equals perft");
+    expect(positions_equal(position, original),
+           "depth-two king-capture divide restores the position");
+
+    Position terminal = original;
+    UndoState unused;
+    do_move(terminal, capture, unused);
+    const Position terminal_original = terminal;
+    expect(perft_divide(terminal, 1).empty(),
+           "an already-terminal position has no divide entries");
+    expect(positions_equal(terminal, terminal_original),
+           "terminal divide preserves all position state");
+}
+
+void test_divide_rotational_totals() {
+    Position position = special_position();
+    const std::uint64_t expected =
+      sum_nodes(perft_divide(position, 2));
+
+    for (int rotation = 0;
+         rotation < COLOR_NB;
+         ++rotation) {
+        const Position original = position;
+        const PerftList entries =
+          perft_divide(position, 2);
+
+        expect(sum_nodes(entries) == expected,
+               "divide total is invariant under rotation");
+        expect(
+          sum_nodes(entries) == perft(position, 2),
+          "rotated divide total equals perft");
+        expect(positions_equal(position, original),
+               "rotated divide restores all position state");
+
+        position = rotate_clockwise(position);
+    }
+}
+
+void test_starting_position_divide_sum() {
+    Position position = starting_position();
+    const Position original = position;
+    const PerftList entries =
+      perft_divide(position, 4);
+
+    expect(
+      sum_nodes(entries) == perft(position, 4),
+      "starting-position depth-four divide sum equals perft");
+    expect(positions_equal(position, original),
+           "starting-position divide restores all state");
+}
+
 }  // namespace
 
 int main() {
@@ -519,6 +768,12 @@ int main() {
     test_terminal_king_capture();
     test_rotational_symmetry();
     test_starting_position_copy_traversal();
+    test_divide_base_depth_and_order();
+    test_divide_copy_counts_and_sums();
+    test_divide_special_moves();
+    test_divide_terminal_capture();
+    test_divide_rotational_totals();
+    test_starting_position_divide_sum();
 
     if (failures != 0) {
         std::cerr << failures
