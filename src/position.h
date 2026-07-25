@@ -11,6 +11,17 @@
 
 namespace Mockingbird {
 
+class Move;
+class Position;
+class UndoState;
+
+// transition.h defines the reversible move functions after castling geometry is
+// available.
+constexpr void do_move(
+  Position& position, Move move, UndoState& undo) noexcept;
+constexpr void undo_move(
+  Position& position, Move move, const UndoState& undo) noexcept;
+
 // Position owns the mailbox and the occupancy bitboards derived from it.
 // Piece mutations update every representation before returning.
 class Position {
@@ -216,6 +227,11 @@ class Position {
     }
 
   private:
+    friend constexpr void do_move(
+      Position& position, Move move, UndoState& undo) noexcept;
+    friend constexpr void undo_move(
+      Position& position, Move move, const UndoState& undo) noexcept;
+
     // Bits 2*c and 2*c+1 store the kingside and queenside rights for Color c.
     [[nodiscard]] static constexpr std::uint8_t castling_right_mask(
       Color color, CastlingSide side) noexcept {
