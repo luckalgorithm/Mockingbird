@@ -1,9 +1,12 @@
 #include "notation.h"
 
+#include "perft.h"
+
 #include <array>
 #include <cassert>
 #include <charconv>
 #include <cstddef>
+#include <limits>
 #include <string_view>
 #include <system_error>
 
@@ -453,8 +456,11 @@ parse_en_passant(
     return {};
 }
 
-void append_decimal(std::string& output, int value) {
-    char buffer[3];
+template<typename Integer>
+void append_decimal(
+  std::string& output, Integer value) {
+    char buffer[
+      std::numeric_limits<Integer>::digits10 + 2];
     const auto result = std::to_chars(
       buffer, buffer + sizeof(buffer), value);
     assert(result.ec == std::errc{});
@@ -469,7 +475,48 @@ void append_square(
     assert(is_ok(square));
     output += char(
       'a' + file_of(square) - FILE_A);
-    append_decimal(output, rank_of(square));
+    append_decimal(output, int(rank_of(square)));
+}
+
+void append_move(
+  std::string& output, Move move) {
+    if (move.is_none()) {
+        output += "none";
+        return;
+    }
+    if (move.is_null()) {
+        output += "null";
+        return;
+    }
+
+    assert(is_ok(move));
+    append_square(output, move.from());
+    output += '-';
+    append_square(output, move.to());
+
+    if (move.is_promotion()) {
+        output += '=';
+        output +=
+          piece_type_character(move.promotion_type());
+    }
+
+    switch (move.type()) {
+        case MoveType::NORMAL:
+        case MoveType::PROMOTION:
+            break;
+
+        case MoveType::CASTLING:
+            output += " (castling)";
+            break;
+
+        case MoveType::EN_PASSANT:
+            output += " (en passant)";
+            break;
+
+        case MoveType::COUNT:
+            assert(false);
+            break;
+    }
 }
 
 }  // namespace
@@ -609,6 +656,45 @@ std::string serialize_position(
     }
 
     return notation;
+}
+
+std::string serialize_move(Move move) {
+    std::string notation;
+    notation.reserve(24);
+    append_move(notation, move);
+    return notation;
+}
+
+std::string format_perft_divide(
+  const PerftList& entries) {
+    std::string output;
+    output.reserve(entries.size() * 45 + 27);
+
+    std::uint64_t total = 0;
+    bool total_overflow = false;
+    for (const PerftEntry& entry : entries) {
+        append_move(output, entry.move);
+        output += ": ";
+        append_decimal(output, entry.nodes);
+        output += '\n';
+
+        if (!total_overflow) {
+            const std::uint64_t available =
+              std::numeric_limits<std::uint64_t>::max()
+              - total;
+            if (entry.nodes > available)
+                total_overflow = true;
+            else
+                total += entry.nodes;
+        }
+    }
+
+    output += "Total: ";
+    if (total_overflow)
+        output += "overflow";
+    else
+        append_decimal(output, total);
+    return output;
 }
 
 }  // namespace Mockingbird

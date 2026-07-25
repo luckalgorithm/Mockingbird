@@ -1,10 +1,12 @@
 #include "notation.h"
+#include "perft.h"
 #include "setup.h"
 
 #include <array>
 #include <cstddef>
 #include <cstdlib>
 #include <iostream>
+#include <limits>
 #include <string>
 #include <string_view>
 
@@ -87,6 +89,40 @@ inline constexpr std::string_view EMPTY_NOTATION =
     }
 
     return true;
+}
+
+[[nodiscard]] constexpr bool perft_lists_equal(
+  const PerftList& left,
+  const PerftList& right) noexcept {
+    if (left.size() != right.size())
+        return false;
+
+    for (std::size_t index = 0;
+         index < left.size();
+         ++index) {
+        if (left[index] != right[index])
+            return false;
+    }
+
+    return true;
+}
+
+[[nodiscard]] constexpr std::uint64_t perft_sum(
+  const PerftList& entries) noexcept {
+    std::uint64_t nodes = 0;
+    for (const PerftEntry& entry : entries)
+        nodes += entry.nodes;
+
+    return nodes;
+}
+
+[[nodiscard]] std::string reference_square(
+  Square square) {
+    std::string result;
+    result += char(
+      'a' + int(file_of(square)) - int(FILE_A));
+    result += std::to_string(int(rank_of(square)));
+    return result;
 }
 
 [[nodiscard]] std::string make_notation(
@@ -805,6 +841,316 @@ void test_deterministic_parse_serialize_parse() {
     }
 }
 
+void test_exact_move_serialization() {
+    expect(
+      serialize_move(Move::normal(
+        make_square(FILE_D, RANK_2),
+        make_square(FILE_D, RANK_4)))
+        == "d2-d4",
+      "normal move has exact notation");
+    expect(
+      serialize_move(Move::promotion(
+        make_square(FILE_B, RANK_10),
+        make_square(FILE_B, RANK_11),
+        QUEEN))
+        == "b10-b11=Q",
+      "promotion has exact notation");
+    expect(
+      serialize_move(Move::castling(
+        make_square(FILE_H, RANK_1),
+        make_square(FILE_J, RANK_1)))
+        == "h1-j1 (castling)",
+      "castling move has exact notation");
+    expect(
+      serialize_move(Move::en_passant(
+        make_square(FILE_D, RANK_5),
+        make_square(FILE_C, RANK_6)))
+        == "d5-c6 (en passant)",
+      "en-passant move has exact notation");
+    expect(
+      serialize_move(Move::en_passant(
+        make_square(FILE_B, RANK_10),
+        make_square(FILE_C, RANK_11),
+        QUEEN))
+        == "b10-c11=Q (en passant)",
+      "en-passant promotion has exact notation");
+    expect(serialize_move(Move::none()) == "none",
+           "none move has exact notation");
+    expect(serialize_move(Move::null()) == "null",
+           "null move has exact notation");
+}
+
+void test_all_promotion_serialization() {
+    constexpr std::array<PieceType, 4>
+      PROMOTION_TYPES = {
+        QUEEN,
+        ROOK,
+        BISHOP,
+        KNIGHT,
+    };
+    constexpr std::array<char, 4>
+      PROMOTION_CHARACTERS = {
+        'Q',
+        'R',
+        'B',
+        'N',
+    };
+    constexpr Square b10 =
+      make_square(FILE_B, RANK_10);
+    constexpr Square b11 =
+      make_square(FILE_B, RANK_11);
+    constexpr Square c11 =
+      make_square(FILE_C, RANK_11);
+
+    for (std::size_t index = 0;
+         index < PROMOTION_TYPES.size();
+         ++index) {
+        std::string promotion = "b10-b11=";
+        promotion += PROMOTION_CHARACTERS[index];
+        expect(
+          serialize_move(Move::promotion(
+            b10, b11, PROMOTION_TYPES[index]))
+            == promotion,
+          "each promotion type has its exact suffix");
+
+        std::string en_passant = "b10-c11=";
+        en_passant += PROMOTION_CHARACTERS[index];
+        en_passant += " (en passant)";
+        expect(
+          serialize_move(Move::en_passant(
+            b10, c11, PROMOTION_TYPES[index]))
+            == en_passant,
+          "each en-passant promotion type has its exact suffix");
+    }
+}
+
+void test_castling_move_serialization() {
+    struct CastlingCase {
+        Color color;
+        CastlingSide side;
+        std::string_view expected;
+    };
+
+    constexpr std::array<CastlingCase, 8> CASES = {{
+      {
+        RED,
+        CastlingSide::KING_SIDE,
+        "h1-j1 (castling)",
+      },
+      {
+        RED,
+        CastlingSide::QUEEN_SIDE,
+        "h1-f1 (castling)",
+      },
+      {
+        BLUE,
+        CastlingSide::KING_SIDE,
+        "a7-a5 (castling)",
+      },
+      {
+        BLUE,
+        CastlingSide::QUEEN_SIDE,
+        "a7-a9 (castling)",
+      },
+      {
+        YELLOW,
+        CastlingSide::KING_SIDE,
+        "g14-e14 (castling)",
+      },
+      {
+        YELLOW,
+        CastlingSide::QUEEN_SIDE,
+        "g14-i14 (castling)",
+      },
+      {
+        GREEN,
+        CastlingSide::KING_SIDE,
+        "n8-n10 (castling)",
+      },
+      {
+        GREEN,
+        CastlingSide::QUEEN_SIDE,
+        "n8-n6 (castling)",
+      },
+    }};
+
+    for (const CastlingCase& test_case : CASES) {
+        const CastlingGeometry& geometry =
+          castling_geometry(
+            test_case.color, test_case.side);
+        expect(
+          serialize_move(Move::castling(
+            geometry.king_source,
+            geometry.king_destination))
+            == test_case.expected,
+          "each color and side has exact castling notation");
+    }
+}
+
+void test_all_normal_move_boundaries() {
+    bool exact = true;
+    std::size_t tested = 0;
+
+    for (int from_index = 0;
+         from_index < SQUARE_NB;
+         ++from_index) {
+        const Square from = Square(from_index);
+        if (!is_ok(from))
+            continue;
+
+        for (int to_index = 0;
+             to_index < SQUARE_NB;
+             ++to_index) {
+            const Square to = Square(to_index);
+            if (!is_ok(to) || from == to)
+                continue;
+
+            const std::string expected =
+              reference_square(from)
+              + "-" + reference_square(to);
+            const Move move =
+              Move::normal(from, to);
+            const std::string first =
+              serialize_move(move);
+            const std::string second =
+              serialize_move(move);
+
+            exact &=
+              first == expected
+              && second == first;
+            ++tested;
+        }
+    }
+
+    expect(exact,
+           "every playable normal source and destination serializes exactly");
+    expect(tested == 160U * 159U,
+           "all distinct playable square pairs are tested");
+}
+
+void test_handcrafted_perft_divide_format() {
+    PerftList entries;
+    entries.push_back({
+      Move::normal(
+        make_square(FILE_D, RANK_2),
+        make_square(FILE_D, RANK_4)),
+      12,
+    });
+    entries.push_back({
+      Move::promotion(
+        make_square(FILE_B, RANK_10),
+        make_square(FILE_B, RANK_11),
+        QUEEN),
+      0,
+    });
+    entries.push_back({
+      Move::castling(
+        make_square(FILE_H, RANK_1),
+        make_square(FILE_J, RANK_1)),
+      3,
+    });
+    entries.push_back({
+      Move::en_passant(
+        make_square(FILE_D, RANK_5),
+        make_square(FILE_C, RANK_6)),
+      4,
+    });
+    const PerftList original = entries;
+
+    constexpr std::string_view EXPECTED =
+      "d2-d4: 12\n"
+      "b10-b11=Q: 0\n"
+      "h1-j1 (castling): 3\n"
+      "d5-c6 (en passant): 4\n"
+      "Total: 19";
+    const std::string formatted =
+      format_perft_divide(entries);
+
+    expect(formatted == EXPECTED,
+           "ordered perft divide has exact formatting and sum");
+    expect(!formatted.empty()
+             && formatted.back() != '\n',
+           "perft divide has no trailing newline");
+    expect(perft_lists_equal(entries, original),
+           "formatting preserves every perft entry");
+
+    PerftList empty;
+    expect(format_perft_divide(empty) == "Total: 0",
+           "empty perft divide has a zero total");
+
+    PerftList maximum;
+    maximum.push_back({
+      Move::normal(
+        make_square(FILE_D, RANK_2),
+        make_square(FILE_D, RANK_4)),
+      std::numeric_limits<std::uint64_t>::max(),
+    });
+    constexpr std::string_view MAXIMUM_EXPECTED =
+      "d2-d4: 18446744073709551615\n"
+      "Total: 18446744073709551615";
+    expect(
+      format_perft_divide(maximum)
+        == MAXIMUM_EXPECTED,
+      "maximum uint64 count formats without truncation");
+
+    PerftList overflow;
+    overflow.push_back({
+      Move::normal(
+        make_square(FILE_D, RANK_2),
+        make_square(FILE_D, RANK_4)),
+      std::numeric_limits<std::uint64_t>::max(),
+    });
+    overflow.push_back({
+      Move::normal(
+        make_square(FILE_E, RANK_2),
+        make_square(FILE_E, RANK_4)),
+      1,
+    });
+    constexpr std::string_view OVERFLOW_EXPECTED =
+      "d2-d4: 18446744073709551615\n"
+      "e2-e4: 1\n"
+      "Total: overflow";
+    expect(
+      format_perft_divide(overflow)
+        == OVERFLOW_EXPECTED,
+      "an unrepresentable total is reported as overflow");
+}
+
+void test_actual_perft_divide_format() {
+    Position position = make_starting_position();
+    const Position original_position = position;
+    const PerftList entries =
+      perft_divide(position, 2);
+    const PerftList original_entries = entries;
+
+    std::string expected;
+    for (const PerftEntry& entry : entries) {
+        expected += serialize_move(entry.move);
+        expected += ": ";
+        expected += std::to_string(entry.nodes);
+        expected += '\n';
+    }
+    expected += "Total: ";
+    expected += std::to_string(perft_sum(entries));
+
+    const std::string first =
+      format_perft_divide(entries);
+    const std::string second =
+      format_perft_divide(entries);
+
+    expect(first == expected,
+           "actual divide lines preserve generation order and counts");
+    expect(second == first,
+           "repeated divide formatting is deterministic");
+    expect(
+      perft_sum(entries) == perft(position, 2),
+      "actual divide total equals perft");
+    expect(positions_equal(position, original_position),
+           "divide generation and perft preserve the position");
+    expect(perft_lists_equal(entries, original_entries),
+           "actual divide formatting preserves its input list");
+}
+
 }  // namespace
 
 int main() {
@@ -821,6 +1167,12 @@ int main() {
     test_malformed_piece_side_and_castling_inputs();
     test_malformed_en_passant_inputs();
     test_deterministic_parse_serialize_parse();
+    test_exact_move_serialization();
+    test_all_promotion_serialization();
+    test_castling_move_serialization();
+    test_all_normal_move_boundaries();
+    test_handcrafted_perft_divide_format();
+    test_actual_perft_divide_format();
 
     if (failures != 0) {
         std::cerr << failures

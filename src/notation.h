@@ -6,9 +6,12 @@
 #include <string>
 #include <string_view>
 
+#include "move.h"
 #include "position.h"
 
 namespace Mockingbird {
+
+class PerftList;
 
 // A position notation contains four whitespace-separated fields:
 //
@@ -62,5 +65,18 @@ using PositionParseResult =
 // Produces the canonical spelling of every state stored by Position.
 [[nodiscard]] std::string serialize_position(
   const Position& position);
+
+// Board moves use source-destination coordinates. Promotions append =N, =B,
+// =R, or =Q. Castling and en-passant moves append " (castling)" and
+// " (en passant)" respectively. Move::none() and Move::null() use "none" and
+// "null". The '-' separator does not imply capture status because Move does
+// not store whether the destination contained a captured piece.
+[[nodiscard]] std::string serialize_move(Move move);
+
+// Produces "<move>: <nodes>" lines in list order, followed by "Total: <nodes>"
+// without a trailing newline. A sum outside the std::uint64_t range is
+// reported as "Total: overflow".
+[[nodiscard]] std::string format_perft_divide(
+  const PerftList& entries);
 
 }  // namespace Mockingbird
