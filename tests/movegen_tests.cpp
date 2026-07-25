@@ -180,7 +180,7 @@ void test_move_list() {
     MoveList moves;
     expect(moves.empty(), "default move list is empty");
     expect(moves.size() == 0, "default move list has size zero");
-    expect(moves.capacity() == 256, "move list has fixed capacity 256");
+    expect(moves.capacity() == 528, "move list has fixed capacity 528");
 
     moves.push_back(first);
     moves.push_back(second);

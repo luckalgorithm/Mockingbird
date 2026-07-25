@@ -8,6 +8,12 @@
 
 namespace Mockingbird {
 
+// This bound applies when one color's material derives from one king, one
+// queen, two rooks, two bishops, two knights, and eight pawns. Treating every
+// pawn as a promoted queen and using empty-board attack maxima gives
+// 9*45 + 2*26 + 2*19 + 2*8 + 8 + 2 = 521 moves.
+inline constexpr std::size_t STANDARD_INVENTORY_MOVE_UPPER_BOUND = 521;
+
 // MoveList stores moves inline and performs no dynamic allocation.
 class MoveList {
   public:
@@ -15,7 +21,8 @@ class MoveList {
     using iterator = Move*;
     using const_iterator = const Move*;
 
-    static constexpr std::size_t CAPACITY = 256;
+    // 528 is the first 16-entry boundary above the inventory-derived bound.
+    static constexpr std::size_t CAPACITY = 528;
 
     constexpr MoveList() noexcept = default;
 
@@ -87,7 +94,9 @@ class MoveList {
     std::size_t size_ = 0;
 };
 
-static_assert(MoveList::capacity() == 256);
+static_assert(MoveList::capacity() == 528);
+static_assert(
+  MoveList::capacity() >= STANDARD_INVENTORY_MOVE_UPPER_BOUND);
 static_assert(MoveList{}.empty());
 
 }  // namespace Mockingbird
