@@ -1,4 +1,5 @@
 #include "perft.h"
+#include "setup.h"
 
 #include <array>
 #include <cstddef>
@@ -266,92 +267,6 @@ inline constexpr std::array<std::uint64_t, 2>
     return position;
 }
 
-[[nodiscard]] constexpr Position starting_position() noexcept {
-    constexpr std::array<PieceType, 8> RED_BACK_RANK = {
-      ROOK,
-      KNIGHT,
-      BISHOP,
-      QUEEN,
-      KING,
-      BISHOP,
-      KNIGHT,
-      ROOK,
-    };
-    constexpr std::array<PieceType, 8> BLUE_BACK_RANK = {
-      ROOK,
-      KNIGHT,
-      BISHOP,
-      KING,
-      QUEEN,
-      BISHOP,
-      KNIGHT,
-      ROOK,
-    };
-    constexpr std::array<PieceType, 8> YELLOW_BACK_RANK = {
-      ROOK,
-      KNIGHT,
-      BISHOP,
-      KING,
-      QUEEN,
-      BISHOP,
-      KNIGHT,
-      ROOK,
-    };
-    constexpr std::array<PieceType, 8> GREEN_BACK_RANK = {
-      ROOK,
-      KNIGHT,
-      BISHOP,
-      QUEEN,
-      KING,
-      BISHOP,
-      KNIGHT,
-      ROOK,
-    };
-
-    Position position;
-
-    for (int offset = 0; offset < 8; ++offset) {
-        const File file = File(int(FILE_D) + offset);
-        const Rank rank = Rank(int(RANK_4) + offset);
-        const std::size_t index =
-          static_cast<std::size_t>(offset);
-
-        position.put_piece(
-          make_piece(RED, RED_BACK_RANK[index]),
-          make_square(file, RANK_1));
-        position.put_piece(
-          R_PAWN, make_square(file, RANK_2));
-
-        position.put_piece(
-          make_piece(YELLOW, YELLOW_BACK_RANK[index]),
-          make_square(file, RANK_14));
-        position.put_piece(
-          Y_PAWN, make_square(file, RANK_13));
-
-        position.put_piece(
-          make_piece(BLUE, BLUE_BACK_RANK[index]),
-          make_square(FILE_A, rank));
-        position.put_piece(
-          B_PAWN, make_square(FILE_B, rank));
-
-        position.put_piece(
-          make_piece(GREEN, GREEN_BACK_RANK[index]),
-          make_square(FILE_N, rank));
-        position.put_piece(
-          G_PAWN, make_square(FILE_M, rank));
-    }
-
-    for (int color_index = 0;
-         color_index < COLOR_NB;
-         ++color_index) {
-        const Color color = Color(color_index);
-        for (const CastlingSide side : CASTLING_SIDES)
-            position.set_castling_right(color, side);
-    }
-
-    return position;
-}
-
 void test_depth_zero_and_one() {
     Position position = kings_only_position();
     const Position original = position;
@@ -514,7 +429,7 @@ void test_rotational_symmetry() {
 }
 
 void test_starting_position_copy_traversal() {
-    Position position = starting_position();
+    Position position = make_starting_position();
     const Position original = position;
 
     for (int depth = 1; depth <= 4; ++depth) {
@@ -747,7 +662,7 @@ void test_divide_rotational_totals() {
 }
 
 void test_starting_position_divide_sum() {
-    Position position = starting_position();
+    Position position = make_starting_position();
     const Position original = position;
     const PerftList entries =
       perft_divide(position, 4);
