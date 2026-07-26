@@ -41,6 +41,7 @@ void expect(bool condition, std::string_view message) {
     using namespace Mockingbird;
 
     if (left.side_to_move() != right.side_to_move()
+        || left.key() != right.key()
         || left.occupied() != right.occupied())
         return false;
 
@@ -91,6 +92,9 @@ void expect(bool condition, std::string_view message) {
 
 void expect_consistent(const Mockingbird::Position& position) {
     using namespace Mockingbird;
+
+    expect(position.key() == position.recompute_key(),
+           "cached key matches the canonical position state");
 
     Bitboard occupied;
     std::array<Bitboard, COLOR_NB> by_color{};

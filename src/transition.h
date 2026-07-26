@@ -214,14 +214,16 @@ constexpr void do_move(
 
     // A target expires when its owner next moves. It also expires when its
     // vulnerable pawn moves, is captured, or is captured en passant.
-    position.en_passant_squares_[std::size_t(moving_color)] =
+    std::array<Square, COLOR_NB> active_en_passant =
+      position.en_passant_squares_;
+    active_en_passant[std::size_t(moving_color)] =
       SQ_NONE;
     for (int owner_index = 0;
          owner_index < COLOR_NB;
          ++owner_index) {
         const Color owner = Color(owner_index);
         const Square target =
-          position.en_passant_squares_[std::size_t(owner)];
+          active_en_passant[std::size_t(owner)];
         if (target == SQ_NONE)
             continue;
 
@@ -231,9 +233,11 @@ constexpr void do_move(
             || to == victim_square
             || (move.type() == MoveType::EN_PASSANT
                 && to == target))
-            position.en_passant_squares_[std::size_t(owner)] =
+            active_en_passant[std::size_t(owner)] =
               SQ_NONE;
     }
+    position.replace_en_passant_squares(
+      active_en_passant);
 
     switch (move.type()) {
         case MoveType::NORMAL:
@@ -306,8 +310,8 @@ constexpr void do_move(
         const Square skipped =
           pawn_push_destination(moving_color, from);
         assert(skipped != SQ_NONE);
-        position.en_passant_squares_[std::size_t(moving_color)] =
-          skipped;
+        position.set_en_passant_square(
+          moving_color, skipped);
     }
 
     std::uint8_t rights_to_clear =
@@ -331,11 +335,11 @@ constexpr void do_move(
                 color_of(undo.captured_on_destination_)));
     }
 
-    position.castling_rights_ =
+    position.replace_castling_rights(
       static_cast<std::uint8_t>(
         position.castling_rights_
-        & static_cast<std::uint8_t>(~rights_to_clear));
-    position.side_to_move_ = next_color(moving_color);
+        & static_cast<std::uint8_t>(~rights_to_clear)));
+    position.set_side_to_move(next_color(moving_color));
 }
 
 // Reverses the matching most-recent do_move() call.
@@ -348,8 +352,8 @@ constexpr void undo_move(
 
     const Square from = move.from();
     const Square to = move.to();
-    position.side_to_move_ =
-      previous_color(position.side_to_move_);
+    position.set_side_to_move(
+      previous_color(position.side_to_move_));
     const Color moving_color = position.side_to_move_;
 
     if (move.type() == MoveType::CASTLING) {
@@ -403,10 +407,10 @@ constexpr void undo_move(
         }
     }
 
-    position.en_passant_squares_ =
-      undo.en_passant_squares_;
-    position.castling_rights_ =
-      undo.castling_rights_;
+    position.replace_en_passant_squares(
+      undo.en_passant_squares_);
+    position.replace_castling_rights(
+      undo.castling_rights_);
 }
 
 static_assert(

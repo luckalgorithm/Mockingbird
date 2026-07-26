@@ -77,6 +77,9 @@ void expect(bool condition, std::string_view message) {
 void expect_consistent(const Mockingbird::Position& position) {
     using namespace Mockingbird;
 
+    expect(position.key() == position.recompute_key(),
+           "cached key matches the canonical position state");
+
     Bitboard expected_occupied;
     std::array<Bitboard, COLOR_NB> expected_by_color{};
     std::array<Bitboard, PIECE_TYPE_NB> expected_by_type{};
@@ -297,6 +300,9 @@ void test_en_passant_state() {
     for (int color_index = 0; color_index < COLOR_NB; ++color_index)
         expect(position.en_passant_square(Color(color_index)) == SQ_NONE,
                "clearing all targets resets every color");
+
+    expect_consistent(position);
+    expect_consistent(copy);
 }
 
 void test_every_castling_right_subset() {
@@ -327,6 +333,8 @@ void test_every_castling_right_subset() {
                 ++bit_index;
             }
         }
+
+        expect_consistent(position);
 
         bit_index = 0;
         for (int color_index = 0; color_index < COLOR_NB; ++color_index) {
@@ -374,6 +382,8 @@ void test_castling_right_clearing_and_copying() {
                            "clearing one castling right preserves the other seven");
                 }
             }
+
+            expect_consistent(position);
         }
     }
 
@@ -399,6 +409,8 @@ void test_castling_right_clearing_and_copying() {
                        "clearing one color preserves the other six rights");
             }
         }
+
+        expect_consistent(position);
     }
 
     Position original;
@@ -413,6 +425,8 @@ void test_castling_right_clearing_and_copying() {
     expect(!original.has_castling_right(
              GREEN, CastlingSide::QUEEN_SIDE),
            "global clearing removes every castling right");
+    expect_consistent(original);
+    expect_consistent(copy);
 }
 
 void test_raw_mutations_preserve_rule_state() {
@@ -445,6 +459,8 @@ void test_raw_mutations_preserve_rule_state() {
             expect(position.has_castling_right(color, side),
                    "raw position mutations preserve castling rights");
     }
+
+    expect_consistent(position);
 }
 
 void test_all_piece_encodings() {

@@ -8,6 +8,7 @@
 
 #include "bitboard.h"
 #include "board.h"
+#include "zobrist.h"
 
 namespace Mockingbird {
 
@@ -22,13 +23,16 @@ constexpr void do_move(
 constexpr void undo_move(
   Position& position, Move move, const UndoState& undo) noexcept;
 
-// Position owns the mailbox and the occupancy bitboards derived from it.
-// Piece mutations update every representation before returning.
+// Position owns the canonical rule state, its derived occupancy bitboards,
+// and a cached key. Mutations update every representation before returning.
 class Position {
   public:
     // A default position is empty, has Red to move, and has no castling rights
     // or en-passant targets.
-    constexpr Position() noexcept {
+    constexpr Position() noexcept
+        : key_(
+            Zobrist::side(RED)
+            ^ Zobrist::castling(0)) {
         en_passant_squares_.fill(SQ_NONE);
     }
 
@@ -50,9 +54,48 @@ class Position {
         return side_to_move_;
     }
 
+    [[nodiscard]] constexpr PositionKey key() const noexcept {
+        return key_;
+    }
+
+    // Reconstructs the key from the position's canonical state.
+    [[nodiscard]] constexpr PositionKey recompute_key() const noexcept {
+        PositionKey result =
+          Zobrist::side(side_to_move_)
+          ^ Zobrist::castling(castling_rights_);
+
+        for (int square_index = 0;
+             square_index < SQUARE_NB;
+             ++square_index) {
+            const Square square = Square(square_index);
+            if (!is_ok(square))
+                continue;
+
+            const Piece piece = piece_on(square);
+            if (piece != NO_PIECE)
+                result ^= Zobrist::piece(piece, square);
+        }
+
+        for (int color_index = 0;
+             color_index < COLOR_NB;
+             ++color_index) {
+            const Color color = Color(color_index);
+            result ^= Zobrist::en_passant(
+              color,
+              en_passant_squares_[std::size_t(color)]);
+        }
+
+        return result;
+    }
+
     // Precondition: color is valid.
     constexpr void set_side_to_move(Color color) noexcept {
         assert(is_ok(color));
+        if (side_to_move_ == color)
+            return;
+
+        key_ ^= Zobrist::side(side_to_move_)
+              ^ Zobrist::side(color);
         side_to_move_ = color;
     }
 
@@ -73,10 +116,10 @@ class Position {
       Color color, CastlingSide side) noexcept {
         assert(is_ok(color));
         assert(is_ok(side));
-        castling_rights_ =
+        replace_castling_rights(
           static_cast<std::uint8_t>(
             castling_rights_
-            | castling_right_mask(color, side));
+            | castling_right_mask(color, side)));
     }
 
     // Preconditions: color and side are valid.
@@ -84,23 +127,32 @@ class Position {
       Color color, CastlingSide side) noexcept {
         assert(is_ok(color));
         assert(is_ok(side));
-        castling_rights_ =
+        replace_castling_rights(
           static_cast<std::uint8_t>(
             castling_rights_
             & static_cast<std::uint8_t>(
-              ~castling_right_mask(color, side)));
+              ~castling_right_mask(color, side))));
     }
 
     // Clears both rights for one color.
     // Precondition: color is valid.
     constexpr void clear_castling_rights(Color color) noexcept {
         assert(is_ok(color));
-        clear_castling_right(color, CastlingSide::KING_SIDE);
-        clear_castling_right(color, CastlingSide::QUEEN_SIDE);
+        const std::uint8_t color_rights =
+          static_cast<std::uint8_t>(
+            castling_right_mask(
+              color, CastlingSide::KING_SIDE)
+            | castling_right_mask(
+              color, CastlingSide::QUEEN_SIDE));
+        replace_castling_rights(
+          static_cast<std::uint8_t>(
+            castling_rights_
+            & static_cast<std::uint8_t>(
+              ~color_rights)));
     }
 
     constexpr void clear_castling_rights() noexcept {
-        castling_rights_ = 0;
+        replace_castling_rights(0);
     }
 
     // The indexed color is the owner of the pawn that created the target.
@@ -116,17 +168,19 @@ class Position {
     constexpr void set_en_passant_square(Color color, Square square) noexcept {
         assert(is_ok(color));
         assert(is_ok(square));
-        en_passant_squares_[std::size_t(color)] = square;
+        replace_en_passant_square(color, square);
     }
 
     // Precondition: color is valid.
     constexpr void clear_en_passant_square(Color color) noexcept {
         assert(is_ok(color));
-        en_passant_squares_[std::size_t(color)] = SQ_NONE;
+        replace_en_passant_square(color, SQ_NONE);
     }
 
     constexpr void clear_en_passant_squares() noexcept {
-        en_passant_squares_.fill(SQ_NONE);
+        std::array<Square, COLOR_NB> empty_targets;
+        empty_targets.fill(SQ_NONE);
+        replace_en_passant_squares(empty_targets);
     }
 
     [[nodiscard]] constexpr const Bitboard& occupied() const noexcept {
@@ -166,6 +220,7 @@ class Position {
         occupied_.set(square);
         by_color_[std::size_t(color_of(piece))].set(square);
         by_type_[std::size_t(type_of(piece))].set(square);
+        key_ ^= Zobrist::piece(piece, square);
     }
 
     // Preconditions: square is playable and contains a piece.
@@ -176,6 +231,7 @@ class Position {
         occupied_.clear(square);
         by_color_[std::size_t(color_of(removed))].clear(square);
         by_type_[std::size_t(type_of(removed))].clear(square);
+        key_ ^= Zobrist::piece(removed, square);
 
         return removed;
     }
@@ -206,6 +262,9 @@ class Position {
         type_pieces.clear(from);
         type_pieces.set(to);
 
+        key_ ^= Zobrist::piece(moving, from)
+              ^ Zobrist::piece(moving, to);
+
         return captured;
     }
 
@@ -221,9 +280,12 @@ class Position {
         for (Bitboard& bitboard : by_type_)
             bitboard.clear();
 
-        clear_castling_rights();
-        clear_en_passant_squares();
+        castling_rights_ = 0;
+        en_passant_squares_.fill(SQ_NONE);
         side_to_move_ = RED;
+        key_ =
+          Zobrist::side(RED)
+          ^ Zobrist::castling(0);
     }
 
   private:
@@ -241,11 +303,51 @@ class Position {
         return static_cast<std::uint8_t>(1U << bit);
     }
 
+    constexpr void replace_castling_rights(
+      std::uint8_t rights) noexcept {
+        if (castling_rights_ == rights)
+            return;
+
+        key_ ^= Zobrist::castling(castling_rights_)
+              ^ Zobrist::castling(rights);
+        castling_rights_ = rights;
+    }
+
+    // SQ_NONE represents an absent target.
+    // Preconditions: color is valid and square is playable or SQ_NONE.
+    constexpr void replace_en_passant_square(
+      Color color,
+      Square square) noexcept {
+        assert(is_ok(color));
+        assert(square == SQ_NONE || is_ok(square));
+
+        Square& current =
+          en_passant_squares_[std::size_t(color)];
+        if (current == square)
+            return;
+
+        key_ ^= Zobrist::en_passant(color, current)
+              ^ Zobrist::en_passant(color, square);
+        current = square;
+    }
+
+    constexpr void replace_en_passant_squares(
+      const std::array<Square, COLOR_NB>& squares) noexcept {
+        for (int color_index = 0;
+             color_index < COLOR_NB;
+             ++color_index) {
+            const Color color = Color(color_index);
+            replace_en_passant_square(
+              color, squares[std::size_t(color)]);
+        }
+    }
+
     Board board_;
     Bitboard occupied_;
     std::array<Bitboard, COLOR_NB> by_color_{};
     std::array<Bitboard, PIECE_TYPE_NB> by_type_{};
     std::array<Square, COLOR_NB> en_passant_squares_{};
+    PositionKey key_;
     std::uint8_t castling_rights_ = 0;
     Color side_to_move_ = RED;
 };
@@ -260,5 +362,6 @@ static_assert(Position{}.en_passant_square(RED) == SQ_NONE);
 static_assert(Position{}.en_passant_square(BLUE) == SQ_NONE);
 static_assert(Position{}.en_passant_square(YELLOW) == SQ_NONE);
 static_assert(Position{}.en_passant_square(GREEN) == SQ_NONE);
+static_assert(Position{}.key() == Position{}.recompute_key());
 
 }  // namespace Mockingbird
