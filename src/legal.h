@@ -63,6 +63,26 @@ namespace Detail {
     return Detail::is_legal_move_with_complete_king_set(position, move);
 }
 
+// Returns after the first legal move is found. A position with a missing or
+// duplicate king of any color has no legal move. The position is restored
+// after every tested candidate.
+[[nodiscard]] constexpr bool has_legal_move(
+  Position& position) noexcept {
+    if (!Detail::has_exactly_one_king_per_color(position))
+        return false;
+
+    MoveList pseudo_moves;
+    generate_moves(position, pseudo_moves);
+
+    for (const Move move : pseudo_moves) {
+        if (Detail::is_legal_move_with_complete_king_set(
+              position, move))
+            return true;
+    }
+
+    return false;
+}
+
 // Appends legal moves in the order produced by generate_moves(). A position
 // with a missing or duplicate king of any color appends no moves. The position
 // is restored after every candidate.
