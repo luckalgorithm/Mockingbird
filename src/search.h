@@ -2,6 +2,7 @@
 
 #include <cassert>
 #include <cstdint>
+#include <expected>
 
 #include "quiescence.h"
 
@@ -30,14 +31,17 @@ struct NodeResult {
     Move best_move = Move::none();
 };
 
-[[nodiscard]] inline NodeResult alpha_beta(
+template<typename State>
+[[nodiscard]] inline
+std::expected<NodeResult, SearchStopReason>
+alpha_beta(
   Position& position,
   PositionHistory& history,
   int depth,
   int ply,
   Score alpha,
   Score beta,
-  SearchState& state) {
+  State& state) {
     assert(depth >= 0);
     assert(ply >= 0);
     assert(depth + ply <= MAX_SEARCH_DEPTH);
@@ -47,7 +51,7 @@ struct NodeResult {
     assert(history.current_key() == position.key());
 
     if (depth == 0) {
-        return {
+        const auto score =
           quiescence(
             position,
             history,
@@ -55,12 +59,20 @@ struct NodeResult {
             0,
             alpha,
             beta,
-            state),
+            state);
+        if (!score)
+            return std::unexpected(
+              score.error());
+
+        return NodeResult{
+          *score,
           Move::none(),
         };
     }
 
-    ++state.nodes;
+    const NodeEntry entry = state.enter_node();
+    if (!entry)
+        return std::unexpected(entry.error());
 
     MoveList legal_moves;
     generate_legal_moves(position, legal_moves);
@@ -72,7 +84,7 @@ struct NodeResult {
         return {};
 
     if (position_result.is_terminal()) {
-        return {
+        return NodeResult{
           terminal_score(
             position_result,
             team_of(position.side_to_move()),
@@ -92,23 +104,29 @@ struct NodeResult {
     // Material ordering is stable. Strict score comparison preserves the
     // first generated move among equal-priority moves with equal search scores.
     for (const Move move : legal_moves) {
-        Score candidate_score = DRAW_SCORE;
+        std::expected<NodeResult, SearchStopReason>
+          child_result{NodeResult{}};
 
         {
             ChildState child{position, history, move};
             // Every move advances to the opposing team, so the child score
             // and child window are negated for the parent perspective.
-            const NodeResult child_result =
-              alpha_beta(
-                position,
-                history,
-                depth - 1,
-                ply + 1,
-                -beta,
-                -alpha,
-                state);
-            candidate_score = -child_result.score;
+            child_result = alpha_beta(
+              position,
+              history,
+              depth - 1,
+              ply + 1,
+              -beta,
+              -alpha,
+              state);
         }
+
+        if (!child_result)
+            return std::unexpected(
+              child_result.error());
+
+        const Score candidate_score =
+          -child_result->score;
 
         if (candidate_score > best_score) {
             best_score = candidate_score;
@@ -123,7 +141,7 @@ struct NodeResult {
     }
 
     assert(is_ok(best_move));
-    return {best_score, best_move};
+    return NodeResult{best_score, best_move};
 }
 
 }  // namespace SearchDetail
@@ -155,7 +173,7 @@ struct NodeResult {
 
     PositionHistory search_history{history};
     SearchDetail::SearchState state;
-    const SearchDetail::NodeResult result =
+    const auto result =
       SearchDetail::alpha_beta(
         position,
         search_history,
@@ -165,9 +183,13 @@ struct NodeResult {
         INFINITE_SCORE,
         state);
 
+    assert(result.has_value());
+    if (!result)
+        return {};
+
     return {
-      result.best_move,
-      result.score,
+      result->best_move,
+      result->score,
       state.nodes,
     };
 }

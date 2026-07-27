@@ -386,7 +386,7 @@ struct QuiescenceResult {
   Score alpha = -INFINITE_SCORE,
   Score beta = INFINITE_SCORE) {
     SearchDetail::SearchState state;
-    const Score score =
+    const auto score =
       SearchDetail::quiescence(
         position,
         history,
@@ -395,7 +395,11 @@ struct QuiescenceResult {
         alpha,
         beta,
         state);
-    return {score, state.nodes};
+    assert(score.has_value());
+    return {
+      score ? *score : DRAW_SCORE,
+      state.nodes,
+    };
 }
 
 struct ReferenceResult {
@@ -506,7 +510,7 @@ static_assert(
       DRAW_SCORE,
       DRAW_SCORE + 1,
       std::declval<SearchDetail::SearchState&>())),
-    Score>);
+    std::expected<Score, SearchStopReason>>);
 static_assert(!noexcept(
   SearchDetail::quiescence(
     std::declval<Position&>(),

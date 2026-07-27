@@ -2,8 +2,11 @@
 
 #include <cassert>
 #include <cstdint>
+#include <expected>
 #include <limits>
+#include <utility>
 
+#include "budget.h"
 #include "evaluate.h"
 #include "ordering.h"
 #include "result.h"
@@ -24,10 +27,35 @@ inline constexpr Score INFINITE_SCORE = 2'000'000;
 
 namespace SearchDetail {
 
-struct SearchState {
+template<typename Budget>
+class BasicSearchState {
+  public:
+    constexpr BasicSearchState() noexcept = default;
+
+    constexpr explicit BasicSearchState(
+      Budget budget) noexcept
+        : budget_(std::move(budget)) {}
+
+    [[nodiscard]] NodeEntry enter_node() noexcept {
+        return budget_.enter_node(nodes);
+    }
+
+    [[nodiscard]] constexpr const Budget&
+    budget() const noexcept {
+        return budget_;
+    }
+
     std::uint64_t nodes = 0;
     MoveOrderingBuffer ordering_buffer;
+
+  private:
+    Budget budget_;
 };
+
+using SearchState =
+  BasicSearchState<UnlimitedBudget>;
+using LimitedSearchState =
+  BasicSearchState<SearchBudget>;
 
 // A constructed ChildState owns one applied move and its history entry.
 // Destruction removes the entry before undoing the move.
@@ -94,14 +122,17 @@ class ChildState {
 // nodes search every legal evasion and do not use stand-pat evaluation.
 // Terminal positions are classified before static evaluation. The fixed
 // quiescence-ply bound ends sequences that reach the bound.
-[[nodiscard]] inline Score quiescence(
+template<typename State>
+[[nodiscard]] inline
+std::expected<Score, SearchStopReason>
+quiescence(
   Position& position,
   PositionHistory& history,
   int ply,
   int quiescence_ply,
   Score alpha,
   Score beta,
-  SearchState& state) {
+  State& state) {
     assert(ply >= 0);
     assert(quiescence_ply >= 0);
     assert(quiescence_ply <= MAX_QUIESCENCE_PLY);
@@ -113,7 +144,9 @@ class ChildState {
     assert(beta <= INFINITE_SCORE);
     assert(history.current_key() == position.key());
 
-    ++state.nodes;
+    const NodeEntry entry = state.enter_node();
+    if (!entry)
+        return std::unexpected(entry.error());
 
     MoveList legal_moves;
     generate_legal_moves(position, legal_moves);
@@ -165,10 +198,11 @@ class ChildState {
       state.ordering_buffer);
 
     for (const Move move : *moves_to_search) {
-        Score candidate_score = DRAW_SCORE;
+        std::expected<Score, SearchStopReason>
+          child_score{DRAW_SCORE};
         {
             ChildState child{position, history, move};
-            candidate_score = -quiescence(
+            child_score = quiescence(
               position,
               history,
               ply + 1,
@@ -177,6 +211,13 @@ class ChildState {
               -alpha,
               state);
         }
+
+        if (!child_score)
+            return std::unexpected(
+              child_score.error());
+
+        const Score candidate_score =
+          -*child_score;
 
         if (candidate_score > best_score)
             best_score = candidate_score;
