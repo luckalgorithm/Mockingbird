@@ -5,6 +5,7 @@
 #include <limits>
 
 #include "evaluate.h"
+#include "ordering.h"
 #include "result.h"
 #include "transition.h"
 
@@ -43,6 +44,7 @@ struct NodeResult {
 
 struct SearchState {
     std::uint64_t nodes = 0;
+    MoveOrderingBuffer ordering_buffer;
 };
 
 // A constructed ChildState owns one applied move and its history entry.
@@ -146,11 +148,16 @@ class ChildState {
     if (depth == 0)
         return {evaluate(position), Move::none()};
 
+    order_moves(
+      position,
+      legal_moves,
+      state.ordering_buffer);
+
     Score best_score = -INFINITE_SCORE;
     Move best_move = Move::none();
 
-    // Legal moves retain generation order. Strict score comparison preserves
-    // the first generated move when two moves have equal scores.
+    // Material ordering is stable. Strict score comparison preserves the
+    // first generated move among equal-priority moves with equal search scores.
     for (const Move move : legal_moves) {
         Score candidate_score = DRAW_SCORE;
 
