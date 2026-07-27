@@ -325,6 +325,70 @@ struct ExhaustiveResult {
 
 // This reference traversal copies each child and does not use alpha-beta
 // bounds, undo_move(), or the search implementation.
+[[nodiscard]] ExhaustiveResult exhaustive_quiescence(
+  Position position,
+  PositionHistory history,
+  int ply,
+  int quiescence_ply) {
+    MoveList legal_moves;
+    generate_legal_moves(position, legal_moves);
+    const PositionResult position_result =
+      terminal_result(position, history, legal_moves);
+
+    if (position_result.is_terminal()) {
+        return {
+          Move::none(),
+          exhaustive_terminal_score(
+            position_result,
+            team_of(position.side_to_move()),
+            ply),
+          1,
+        };
+    }
+
+    if (quiescence_ply == MAX_QUIESCENCE_PLY) {
+        return {
+          Move::none(),
+          evaluate(position),
+          1,
+        };
+    }
+
+    const bool checked = in_check(position);
+    ExhaustiveResult result;
+    result.score =
+      checked ? -INFINITE_SCORE : evaluate(position);
+    result.nodes = 1;
+
+    for (const Move move : legal_moves) {
+        if (!checked
+            && !is_tactical_move(position, move))
+            continue;
+
+        Position child_position = position;
+        UndoState unused;
+        do_move(child_position, move, unused);
+
+        PositionHistory child_history = history;
+        child_history.push(child_position.key());
+        const ExhaustiveResult child =
+          exhaustive_quiescence(
+            child_position,
+            child_history,
+            ply + 1,
+            quiescence_ply + 1);
+        const Score candidate = -child.score;
+        result.nodes += child.nodes;
+
+        if (candidate > result.score)
+            result.score = candidate;
+    }
+
+    return result;
+}
+
+// This fixed-depth reference uses the full-width quiescence traversal at each
+// horizon node.
 [[nodiscard]] ExhaustiveResult exhaustive_search(
   Position position,
   PositionHistory history,
@@ -346,13 +410,9 @@ struct ExhaustiveResult {
         };
     }
 
-    if (depth == 0) {
-        return {
-          Move::none(),
-          evaluate(position),
-          1,
-        };
-    }
+    if (depth == 0)
+        return exhaustive_quiescence(
+          position, history, ply, 0);
 
     ExhaustiveResult result;
     result.score = -INFINITE_SCORE;
@@ -387,7 +447,7 @@ struct ExhaustiveResult {
 static_assert(DRAW_SCORE == 0);
 static_assert(MAX_SEARCH_DEPTH > 0);
 static_assert(
-  MATE_SCORE - MAX_SEARCH_DEPTH
+  MATE_SCORE - MAX_SEARCH_PLY
   > MAX_MATERIAL_SCORE);
 static_assert(
   SearchDetail::terminal_score(
@@ -399,13 +459,13 @@ static_assert(
   SearchDetail::terminal_score(
     PositionResult::checkmate(RED_YELLOW),
     BLUE_GREEN,
-    MAX_SEARCH_DEPTH)
-  == -(MATE_SCORE - MAX_SEARCH_DEPTH));
+    MAX_SEARCH_PLY)
+  == -(MATE_SCORE - MAX_SEARCH_PLY));
 static_assert(
   SearchDetail::terminal_score(
     PositionResult::stalemate(),
     RED_YELLOW,
-    MAX_SEARCH_DEPTH)
+    MAX_SEARCH_PLY)
   == DRAW_SCORE);
 static_assert(
   std::is_same_v<
@@ -427,7 +487,7 @@ static_assert(
     DRAW_SCORE,
     1}.has_move());
 
-void test_depth_zero_material_evaluation() {
+void test_depth_zero_quiescence() {
     Position position = material_tactic_position();
     const Position original = position;
     const std::array keys = {position.key()};
@@ -441,17 +501,17 @@ void test_depth_zero_material_evaluation() {
     expect(evaluate(position) == -400,
            "the horizon fixture has the expected material balance");
     expect(
-      result
-        == SearchResult{
-             Move::none(), -400, 1},
-      "depth zero evaluates the current position without choosing a move");
+      result.best_move == Move::none()
+        && result.score == ROOK_VALUE
+        && result.nodes > 1,
+      "depth zero resolves the hanging queen without choosing a move");
     expect(
       positions_equal(position, original),
-      "depth-zero search preserves every position field");
+      "depth-zero quiescence preserves every position field");
     expect(
       history.capacity() == original_capacity
         && history_matches(history, keys),
-      "depth-zero search preserves the complete history");
+      "depth-zero quiescence preserves the complete history");
 }
 
 void test_material_capture_for_every_color() {
@@ -480,12 +540,14 @@ void test_material_capture_for_every_color() {
 
         expect(
           result.best_move == expected
-            && result.score == ROOK_VALUE
-            && result.nodes
-                 == 1
-                    + static_cast<std::uint64_t>(
-                        legal_moves.size()),
+            && result.score == ROOK_VALUE,
           "depth one selects the unique queen capture for each color");
+        expect(
+          result.nodes
+            >= 1
+               + static_cast<std::uint64_t>(
+                   legal_moves.size()),
+          "depth one counts every root child and its tactical continuations");
         expect(
           positions_equal(position, original),
           "rotated material search preserves every position field");
@@ -701,10 +763,10 @@ void test_special_move_state_restoration() {
     expect(
       result.has_move()
         && result.nodes
-             == 1
+             >= 1
                 + static_cast<std::uint64_t>(
                     legal_moves.size()),
-      "depth-one search visits every legal special-move branch");
+      "depth-one search visits every legal branch and quiescence continuation");
     expect(
       positions_equal(position, original),
       "special-move search restores castling and en-passant state");
@@ -814,7 +876,7 @@ void test_invalid_inputs_return_without_searching_in_release() {
 }  // namespace
 
 int main() {
-    test_depth_zero_material_evaluation();
+    test_depth_zero_quiescence();
     test_material_capture_for_every_color();
     test_terminal_positions_precede_evaluation();
     test_immediate_king_capture();

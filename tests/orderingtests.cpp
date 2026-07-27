@@ -1125,11 +1125,13 @@ struct ReferenceResult {
     std::uint64_t nodes = 0;
 };
 
-[[nodiscard]] ReferenceResult unordered_alpha_beta(
+// This reference follows generation order in both fixed-depth and
+// quiescence nodes.
+[[nodiscard]] ReferenceResult unordered_quiescence(
   Position& position,
   PositionHistory& history,
-  int depth,
   int ply,
+  int quiescence_ply,
   Score alpha,
   Score beta) {
     ReferenceResult result;
@@ -1150,8 +1152,90 @@ struct ReferenceResult {
         return result;
     }
 
-    if (depth == 0) {
+    if (quiescence_ply == MAX_QUIESCENCE_PLY) {
         result.score = evaluate(position);
+        return result;
+    }
+
+    const bool checked = in_check(position);
+    result.score =
+      checked ? -INFINITE_SCORE : evaluate(position);
+
+    if (!checked) {
+        if (result.score >= beta)
+            return result;
+        if (result.score > alpha)
+            alpha = result.score;
+    }
+
+    for (const Move move : legal_moves) {
+        if (!checked
+            && !is_tactical_move(position, move))
+            continue;
+
+        UndoState undo;
+        do_move(position, move, undo);
+        const PositionKey child_key =
+          position.key();
+        history.push(child_key);
+
+        const ReferenceResult child =
+          unordered_quiescence(
+            position,
+            history,
+            ply + 1,
+            quiescence_ply + 1,
+            -beta,
+            -alpha);
+        const Score candidate = -child.score;
+        result.nodes += child.nodes;
+
+        history.pop(child_key);
+        undo_move(position, move, undo);
+
+        if (candidate > result.score)
+            result.score = candidate;
+        if (candidate > alpha)
+            alpha = candidate;
+        if (alpha >= beta)
+            break;
+    }
+
+    return result;
+}
+
+[[nodiscard]] ReferenceResult unordered_alpha_beta(
+  Position& position,
+  PositionHistory& history,
+  int depth,
+  int ply,
+  Score alpha,
+  Score beta) {
+    if (depth == 0) {
+        return unordered_quiescence(
+          position,
+          history,
+          ply,
+          0,
+          alpha,
+          beta);
+    }
+
+    ReferenceResult result;
+    result.nodes = 1;
+
+    MoveList legal_moves;
+    generate_legal_moves(position, legal_moves);
+    const PositionResult position_result =
+      terminal_result(position, history, legal_moves);
+
+    assert(position_result.is_valid());
+    if (position_result.is_terminal()) {
+        result.score =
+          SearchDetail::terminal_score(
+            position_result,
+            team_of(position.side_to_move()),
+            ply);
         return result;
     }
 

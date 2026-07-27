@@ -2,25 +2,13 @@
 
 #include <cassert>
 #include <cstdint>
-#include <limits>
 
-#include "evaluate.h"
-#include "ordering.h"
-#include "result.h"
-#include "transition.h"
+#include "quiescence.h"
 
 namespace Mockingbird {
 
-inline constexpr Score DRAW_SCORE = 0;
-inline constexpr int MAX_SEARCH_DEPTH = 256;
-
-// The score ranges leave space between material evaluation, mate scores, and
-// the search-window bounds.
-inline constexpr Score MATE_SCORE = 1'000'000;
-inline constexpr Score INFINITE_SCORE = 2'000'000;
-
 // SearchResult::nodes counts every entered node, including the root and
-// horizon nodes.
+// quiescence nodes.
 struct SearchResult {
     Move best_move = Move::none();
     Score score = DRAW_SCORE;
@@ -42,72 +30,6 @@ struct NodeResult {
     Move best_move = Move::none();
 };
 
-struct SearchState {
-    std::uint64_t nodes = 0;
-    MoveOrderingBuffer ordering_buffer;
-};
-
-// A constructed ChildState owns one applied move and its history entry.
-// Destruction removes the entry before undoing the move.
-class ChildState {
-  public:
-    ChildState(
-      Position& position,
-      PositionHistory& history,
-      Move move)
-        : position_(position),
-          history_(history),
-          move_(move) {
-        do_move(position_, move_, undo_);
-        child_key_ = position_.key();
-
-        try {
-            history_.push(child_key_);
-        } catch (...) {
-            undo_move(position_, move_, undo_);
-            throw;
-        }
-    }
-
-    ChildState(const ChildState&) = delete;
-    ChildState& operator=(const ChildState&) = delete;
-    ChildState(ChildState&&) = delete;
-    ChildState& operator=(ChildState&&) = delete;
-
-    ~ChildState() noexcept {
-        history_.pop(child_key_);
-        undo_move(position_, move_, undo_);
-    }
-
-  private:
-    Position& position_;
-    PositionHistory& history_;
-    Move move_;
-    UndoState undo_;
-    PositionKey child_key_ = 0;
-};
-
-// Returns a terminal score from the team-to-move perspective.
-[[nodiscard]] constexpr Score terminal_score(
-  const PositionResult& result,
-  Team perspective,
-  int ply) noexcept {
-    assert(result.is_terminal());
-    assert(is_ok(perspective));
-    assert(ply >= 0);
-    assert(ply <= MAX_SEARCH_DEPTH);
-
-    const auto winner = result.winning_team();
-    if (!winner)
-        return DRAW_SCORE;
-
-    const Score win_score =
-      MATE_SCORE - static_cast<Score>(ply);
-    return *winner == perspective
-        ? win_score
-        : -win_score;
-}
-
 [[nodiscard]] inline NodeResult alpha_beta(
   Position& position,
   PositionHistory& history,
@@ -123,6 +45,20 @@ class ChildState {
     assert(alpha < beta);
     assert(beta <= INFINITE_SCORE);
     assert(history.current_key() == position.key());
+
+    if (depth == 0) {
+        return {
+          quiescence(
+            position,
+            history,
+            ply,
+            0,
+            alpha,
+            beta,
+            state),
+          Move::none(),
+        };
+    }
 
     ++state.nodes;
 
@@ -144,9 +80,6 @@ class ChildState {
           Move::none(),
         };
     }
-
-    if (depth == 0)
-        return {evaluate(position), Move::none()};
 
     order_moves(
       position,
@@ -195,9 +128,11 @@ class ChildState {
 
 }  // namespace SearchDetail
 
-// Returns the fixed-depth negamax result. Terminal positions end a line before
-// the horizon, and alpha-beta bounds can prune lines that cannot affect it.
-// The position is restored before return, and history is read-only.
+// Returns the fixed-depth negamax result. At the nominal horizon, quiescence
+// continues captures, promotions, and every legal check evasion. Terminal
+// positions end a line before evaluation, and alpha-beta bounds can prune
+// lines that cannot affect the result. The position is restored before
+// return, and history is read-only.
 // Preconditions:
 // - depth is in the inclusive range 0..MAX_SEARCH_DEPTH;
 // - history.current_key() equals position.key();
@@ -237,17 +172,6 @@ class ChildState {
     };
 }
 
-static_assert(MAX_SEARCH_DEPTH > 0);
-static_assert(
-  MATE_SCORE - MAX_SEARCH_DEPTH
-  > MAX_MATERIAL_SCORE);
-static_assert(MATE_SCORE < INFINITE_SCORE);
-static_assert(
-  INFINITE_SCORE
-  < std::numeric_limits<Score>::max());
-static_assert(
-  -INFINITE_SCORE
-  > std::numeric_limits<Score>::lowest());
 static_assert(!SearchResult{}.has_move());
 
 }  // namespace Mockingbird
