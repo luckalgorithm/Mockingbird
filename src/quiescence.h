@@ -55,6 +55,7 @@ class BasicSearchState {
 
     std::uint64_t nodes = 0;
     MoveOrderingBuffer ordering_buffer;
+    QuietHistory quiet_history;
 
   private:
     Budget budget_;
@@ -204,7 +205,8 @@ quiescence(
     order_moves(
       position,
       *moves_to_search,
-      state.ordering_buffer);
+      state.ordering_buffer,
+      state.quiet_history);
 
     for (const Move move : *moves_to_search) {
         std::expected<Score, SearchStopReason>

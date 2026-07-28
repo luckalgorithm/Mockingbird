@@ -12,6 +12,7 @@
 namespace Mockingbird {
 
 using MoveOrderScore = std::uint32_t;
+using HistoryScore = std::int32_t;
 
 namespace OrderingDetail {
 
@@ -202,6 +203,147 @@ inline constexpr MoveOrderScore KING_CAPTURE_SCORE =
     return OrderingDetail::QUIET_SCORE;
 }
 
+// QuietHistory entries are separated by player, piece type, and destination
+// square. Unused NO_PIECE_TYPE entries remain zero.
+class QuietHistory {
+  public:
+    static constexpr HistoryScore LIMIT = 16'384;
+    static constexpr HistoryScore MAX_DEPTH_BONUS = 2'048;
+    static constexpr HistoryScore DEPTH_BONUS_SCALE = 32;
+
+    constexpr QuietHistory() noexcept = default;
+
+    // Preconditions:
+    // - piece is a real piece;
+    // - destination is a playable square.
+    [[nodiscard]] constexpr HistoryScore score(
+      Piece piece,
+      Square destination) const noexcept {
+        assert(is_ok(piece));
+        assert(is_ok(destination));
+
+        return entries_[color_index(piece)]
+                       [type_index(piece)]
+                       [square_index(destination)];
+    }
+
+    // Applies a bounded gravity update to one entry. Positive bonuses raise
+    // the entry and negative bonuses lower it.
+    // Preconditions:
+    // - piece is a real piece;
+    // - destination is a playable square.
+    constexpr void update(
+      Piece piece,
+      Square destination,
+      HistoryScore bonus) noexcept {
+        assert(is_ok(piece));
+        assert(is_ok(destination));
+
+        const std::int64_t bounded_bonus =
+          bonus < -LIMIT
+            ? -static_cast<std::int64_t>(LIMIT)
+            : bonus > LIMIT
+                ? static_cast<std::int64_t>(LIMIT)
+                : static_cast<std::int64_t>(bonus);
+        const std::int64_t magnitude =
+          bounded_bonus < 0
+            ? -bounded_bonus
+            : bounded_bonus;
+
+        Storage& entry =
+          entries_[color_index(piece)]
+                  [type_index(piece)]
+                  [square_index(destination)];
+        const std::int64_t current = entry;
+        std::int64_t next =
+          current + bounded_bonus
+          - current * magnitude / LIMIT;
+
+        if (next > LIMIT)
+            next = LIMIT;
+        else if (next < -LIMIT)
+            next = -LIMIT;
+
+        assert(
+          next >= std::numeric_limits<Storage>::lowest()
+          && next
+               <= std::numeric_limits<Storage>::max());
+        entry = static_cast<Storage>(next);
+    }
+
+    // The depth bonus grows quadratically through depth eight and remains
+    // MAX_DEPTH_BONUS at greater depths.
+    // Precondition: depth is positive.
+    [[nodiscard]] static constexpr HistoryScore
+    depth_bonus(int depth) noexcept {
+        assert(depth > 0);
+
+        constexpr int SATURATION_DEPTH = 8;
+        const std::int64_t bounded_depth =
+          depth < SATURATION_DEPTH
+            ? depth
+            : SATURATION_DEPTH;
+        return static_cast<HistoryScore>(
+          DEPTH_BONUS_SCALE
+          * bounded_depth
+          * bounded_depth);
+    }
+
+    // Precondition: depth is positive.
+    constexpr void reward(
+      Piece piece,
+      Square destination,
+      int depth) noexcept {
+        update(
+          piece,
+          destination,
+          depth_bonus(depth));
+    }
+
+    // Precondition: depth is positive.
+    constexpr void penalize(
+      Piece piece,
+      Square destination,
+      int depth) noexcept {
+        update(
+          piece,
+          destination,
+          -depth_bonus(depth));
+    }
+
+    constexpr void clear() noexcept {
+        entries_ = {};
+    }
+
+  private:
+    using Storage = std::int16_t;
+    using SquareEntries =
+      std::array<Storage, SQUARE_NB>;
+    using TypeEntries =
+      std::array<SquareEntries, PIECE_TYPE_NB>;
+    using ColorEntries =
+      std::array<TypeEntries, COLOR_NB>;
+
+    [[nodiscard]] static constexpr std::size_t
+    color_index(Piece piece) noexcept {
+        return static_cast<std::size_t>(
+          color_of(piece));
+    }
+
+    [[nodiscard]] static constexpr std::size_t
+    type_index(Piece piece) noexcept {
+        return static_cast<std::size_t>(
+          type_of(piece));
+    }
+
+    [[nodiscard]] static constexpr std::size_t
+    square_index(Square square) noexcept {
+        return static_cast<std::size_t>(square);
+    }
+
+    ColorEntries entries_{};
+};
+
 // MoveOrderingBuffer stores merge-sort output between passes. One buffer can
 // be reused after each completed order_moves() call.
 class MoveOrderingBuffer {
@@ -267,6 +409,7 @@ constexpr void merge_pass(
   const Position& position,
   MoveList& moves,
   MoveOrderingBuffer& buffer,
+  const QuietHistory* history,
   std::size_t width,
   bool source_is_move_list) noexcept {
     const std::size_t size = moves.size();
@@ -301,9 +444,30 @@ constexpr void merge_pass(
                 buffer,
                 source_is_move_list,
                 right);
-            const bool take_right =
-              move_order_score(position, right_move)
-              > move_order_score(position, left_move);
+            const MoveOrderScore left_material =
+              move_order_score(
+                position, left_move);
+            const MoveOrderScore right_material =
+              move_order_score(
+                position, right_move);
+
+            bool take_right =
+              right_material > left_material;
+            if (right_material == left_material
+                && right_material == QUIET_SCORE
+                && history) {
+                const Piece left_piece =
+                  position.piece_on(
+                    left_move.from());
+                const Piece right_piece =
+                  position.piece_on(
+                    right_move.from());
+                take_right =
+                  history->score(
+                    right_piece, right_move.to())
+                  > history->score(
+                      left_piece, left_move.to());
+            }
 
             write_move(
               moves,
@@ -347,19 +511,11 @@ constexpr void merge_pass(
     }
 }
 
-}  // namespace OrderingDetail
-
-// Orders moves by descending material-order score using stable bottom-up merge
-// sort. A preferred move contained in the list is moved to the first position;
-// every other move retains its sorted relative order. The position is
-// unchanged and no dynamic allocation is performed.
-// Preconditions:
-// - every entry in moves was generated for position;
-// - buffer is not in use by another order_moves() call.
-constexpr void order_moves(
+constexpr void order_moves_impl(
   const Position& position,
   MoveList& moves,
   MoveOrderingBuffer& buffer,
+  const QuietHistory* history,
   Move preferred = Move::none()) noexcept {
     if (moves.size() >= 2) {
         bool source_is_move_list = true;
@@ -370,6 +526,7 @@ constexpr void order_moves(
               position,
               moves,
               buffer,
+              history,
               width,
               source_is_move_list);
             source_is_move_list =
@@ -408,6 +565,58 @@ constexpr void order_moves(
     moves[0] = preferred;
 }
 
+}  // namespace OrderingDetail
+
+// Orders tactical moves by descending material score and quiet moves by
+// descending history score. Equal scores retain their existing order. A
+// preferred move contained in the list is placed first after sorting. The
+// position is unchanged and no dynamic allocation is performed.
+// Preconditions:
+// - every entry in moves was generated for position;
+// - buffer is not in use by another order_moves() call.
+constexpr void order_moves(
+  const Position& position,
+  MoveList& moves,
+  MoveOrderingBuffer& buffer,
+  const QuietHistory& history,
+  Move preferred = Move::none()) noexcept {
+    OrderingDetail::order_moves_impl(
+      position,
+      moves,
+      buffer,
+      &history,
+      preferred);
+}
+
+// This overload preserves stable generation order among quiet moves.
+constexpr void order_moves(
+  const Position& position,
+  MoveList& moves,
+  MoveOrderingBuffer& buffer,
+  Move preferred = Move::none()) noexcept {
+    OrderingDetail::order_moves_impl(
+      position,
+      moves,
+      buffer,
+      nullptr,
+      preferred);
+}
+
+// This overload owns its temporary merge-sort buffer.
+constexpr void order_moves(
+  const Position& position,
+  MoveList& moves,
+  const QuietHistory& history,
+  Move preferred = Move::none()) noexcept {
+    MoveOrderingBuffer buffer;
+    order_moves(
+      position,
+      moves,
+      buffer,
+      history,
+      preferred);
+}
+
 // This overload owns its temporary merge-sort buffer.
 constexpr void order_moves(
   const Position& position,
@@ -429,6 +638,23 @@ static_assert(OrderingDetail::MAX_PROMOTION_SCORE
 static_assert(
   OrderingDetail::KING_CAPTURE_SCORE
   < std::numeric_limits<MoveOrderScore>::max());
+static_assert(QuietHistory::LIMIT > 0);
+static_assert(
+  QuietHistory::LIMIT
+  <= std::numeric_limits<std::int16_t>::max());
+static_assert(QuietHistory::MAX_DEPTH_BONUS > 0);
+static_assert(
+  QuietHistory::MAX_DEPTH_BONUS
+  < QuietHistory::LIMIT);
+static_assert(
+  QuietHistory::depth_bonus(1)
+  == QuietHistory::DEPTH_BONUS_SCALE);
+static_assert(
+  QuietHistory::depth_bonus(8)
+  == QuietHistory::MAX_DEPTH_BONUS);
+static_assert(
+  QuietHistory::depth_bonus(256)
+  == QuietHistory::MAX_DEPTH_BONUS);
 static_assert(
   OrderingDetail::attacker_cost(PAWN)
   < OrderingDetail::attacker_cost(KNIGHT));

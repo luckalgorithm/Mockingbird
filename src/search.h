@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cassert>
+#include <cstddef>
 #include <cstdint>
 #include <expected>
 
@@ -211,15 +212,20 @@ alpha_beta(
       position,
       legal_moves,
       state.ordering_buffer,
+      state.quiet_history,
       ordering_move);
 
     Score best_score = -INFINITE_SCORE;
     Move best_move = Move::none();
-    bool first_move = true;
 
     // Strict score comparison preserves the first searched move among moves
     // that receive equal search scores.
-    for (const Move move : legal_moves) {
+    for (std::size_t move_index = 0;
+         move_index < legal_moves.size();
+         ++move_index) {
+        const Move move = legal_moves[move_index];
+        const bool quiet =
+          !is_tactical_move(position, move);
         std::expected<NodeResult, SearchStopReason>
           child_result{NodeResult{}};
 
@@ -227,7 +233,7 @@ alpha_beta(
             ChildState child{position, history, move};
             // Every move advances to the opposing team, so the child score
             // and child window are negated for the parent perspective.
-            if (first_move) {
+            if (move_index == 0) {
                 child_result = alpha_beta(
                   position,
                   history,
@@ -274,7 +280,6 @@ alpha_beta(
 
         const Score candidate_score =
           -child_result->score;
-        first_move = false;
 
         if (candidate_score > best_score) {
             best_score = candidate_score;
@@ -284,8 +289,44 @@ alpha_beta(
         if (candidate_score > alpha)
             alpha = candidate_score;
 
-        if (alpha >= beta)
+        if (alpha >= beta) {
+            if (quiet) {
+                const Piece cutoff_piece =
+                  position.piece_on(
+                    move.from());
+                state.quiet_history.reward(
+                  cutoff_piece,
+                  move.to(),
+                  depth);
+
+                // Every earlier move completed before this cutoff. An
+                // aliased cutoff entry is not updated in both directions.
+                for (std::size_t prior_index = 0;
+                     prior_index < move_index;
+                     ++prior_index) {
+                    const Move prior =
+                      legal_moves[prior_index];
+                    if (is_tactical_move(
+                          position, prior)) {
+                        continue;
+                    }
+
+                    const Piece prior_piece =
+                      position.piece_on(
+                        prior.from());
+                    if (prior_piece == cutoff_piece
+                        && prior.to() == move.to()) {
+                        continue;
+                    }
+
+                    state.quiet_history.penalize(
+                      prior_piece,
+                      prior.to(),
+                      depth);
+                }
+            }
             break;
+        }
     }
 
     assert(is_ok(best_move));

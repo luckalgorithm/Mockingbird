@@ -7,6 +7,8 @@
 #include <cstdint>
 #include <cstdlib>
 #include <iostream>
+#include <limits>
+#include <optional>
 #include <string_view>
 #include <type_traits>
 #include <utility>
@@ -333,6 +335,29 @@ material_tactic_position() noexcept {
     return position;
 }
 
+[[nodiscard]] constexpr Position
+quiet_history_cutoff_position() noexcept {
+    Position position = kings_only_position();
+    position.put_piece(
+      Y_BISHOP, make_square(FILE_N, RANK_4));
+    position.put_piece(
+      B_PAWN, make_square(FILE_J, RANK_14));
+    position.set_side_to_move(YELLOW);
+    return position;
+}
+
+[[nodiscard]] constexpr Position
+quiet_history_alias_position() noexcept {
+    Position position = kings_only_position();
+    position.put_piece(
+      R_KNIGHT, make_square(FILE_E, RANK_4));
+    position.put_piece(
+      R_KNIGHT, make_square(FILE_G, RANK_4));
+    position.put_piece(
+      B_ROOK, make_square(FILE_G, RANK_8));
+    return position;
+}
+
 [[nodiscard]] consteval bool
 constexpr_ordering_works() {
     Position position = material_tactic_position();
@@ -375,6 +400,18 @@ static_assert(noexcept(
   order_moves(
     std::declval<const Position&>(),
     std::declval<MoveList&>())));
+static_assert(
+  QuietHistory::depth_bonus(1)
+  == QuietHistory::DEPTH_BONUS_SCALE);
+static_assert(
+  QuietHistory::depth_bonus(3)
+  == HistoryScore{288});
+static_assert(
+  QuietHistory::depth_bonus(8)
+  == QuietHistory::MAX_DEPTH_BONUS);
+static_assert(
+  QuietHistory::depth_bonus(MAX_SEARCH_DEPTH)
+  == QuietHistory::MAX_DEPTH_BONUS);
 
 void test_every_attacker_and_victim() {
     for (int rotation = 0;
@@ -1119,6 +1156,228 @@ void test_en_passant_promotions() {
     }
 }
 
+void test_quiet_history_table() {
+    constexpr Square destination =
+      make_square(FILE_G, RANK_11);
+    constexpr Square other_destination =
+      make_square(FILE_H, RANK_11);
+    constexpr HistoryScore depth_three_bonus =
+      QuietHistory::depth_bonus(3);
+
+    QuietHistory history;
+    expect(
+      history.score(Y_BISHOP, destination) == 0
+        && history.score(
+             B_BISHOP, destination) == 0
+        && history.score(
+             Y_ROOK, destination) == 0
+        && history.score(
+             Y_BISHOP, other_destination) == 0,
+      "quiet history starts at zero for independent table indexes");
+
+    history.reward(
+      Y_BISHOP, destination, 3);
+    expect(
+      history.score(Y_BISHOP, destination)
+          == depth_three_bonus
+        && history.score(
+             B_BISHOP, destination) == 0
+        && history.score(
+             Y_ROOK, destination) == 0
+        && history.score(
+             Y_BISHOP, other_destination) == 0,
+      "quiet history separates player, piece type, and destination");
+
+    history.reward(
+      Y_BISHOP, destination, 3);
+    expect(
+      history.score(Y_BISHOP, destination)
+        == HistoryScore{571},
+      "repeated quiet-history rewards use bounded gravity");
+
+    QuietHistory penalties;
+    penalties.penalize(
+      Y_BISHOP, destination, 3);
+    expect(
+      penalties.score(Y_BISHOP, destination)
+        == -depth_three_bonus,
+      "quiet-history penalties use the negative depth bonus");
+
+    QuietHistory bounds;
+    bounds.update(
+      Y_BISHOP,
+      destination,
+      std::numeric_limits<HistoryScore>::max());
+    bounds.update(
+      Y_BISHOP,
+      destination,
+      std::numeric_limits<HistoryScore>::max());
+    expect(
+      bounds.score(Y_BISHOP, destination)
+        == QuietHistory::LIMIT,
+      "positive gravity updates remain at the history limit");
+
+    bounds.update(
+      Y_BISHOP,
+      destination,
+      std::numeric_limits<HistoryScore>::lowest());
+    bounds.update(
+      Y_BISHOP,
+      destination,
+      std::numeric_limits<HistoryScore>::lowest());
+    expect(
+      bounds.score(Y_BISHOP, destination)
+        == -QuietHistory::LIMIT,
+      "negative gravity updates remain at the history limit");
+
+    Position alias_position =
+      kings_only_position();
+    constexpr Move left_alias = Move::normal(
+      make_square(FILE_F, RANK_9),
+      make_square(FILE_G, RANK_10));
+    constexpr Move right_alias = Move::normal(
+      make_square(FILE_H, RANK_9),
+      make_square(FILE_G, RANK_10));
+    alias_position.put_piece(
+      R_BISHOP, left_alias.from());
+    alias_position.put_piece(
+      R_BISHOP, right_alias.from());
+
+    QuietHistory aliases;
+    aliases.update(
+      alias_position.piece_on(
+        left_alias.from()),
+      left_alias.to(),
+      HistoryScore{123});
+    expect(
+      aliases.score(
+        alias_position.piece_on(
+          right_alias.from()),
+        right_alias.to())
+        == HistoryScore{123},
+      "same-player same-piece moves to one destination share a history index");
+
+    history.clear();
+    bounds.clear();
+    aliases.clear();
+    expect(
+      history.score(Y_BISHOP, destination) == 0
+        && bounds.score(
+             Y_BISHOP, destination) == 0
+        && aliases.score(
+             R_BISHOP, left_alias.to()) == 0,
+      "clearing quiet history restores every observed entry to zero");
+}
+
+void test_quiet_history_ordering() {
+    Position position =
+      material_tactic_position();
+    const Position original = position;
+    const Move capture = Move::normal(
+      make_square(FILE_F, RANK_5),
+      make_square(FILE_F, RANK_8));
+
+    MoveList legal_moves;
+    generate_legal_moves(position, legal_moves);
+    std::array<Move, 3> quiets{};
+    std::size_t quiet_count = 0;
+    for (const Move move : legal_moves) {
+        if (is_tactical_move(position, move)
+            || quiet_count == quiets.size()) {
+            continue;
+        }
+
+        quiets[quiet_count++] = move;
+    }
+
+    expect(
+      contains_move(legal_moves, capture)
+        && quiet_count == quiets.size(),
+      "the history-ordering fixture contains one capture and "
+      "three quiet moves");
+    if (!contains_move(legal_moves, capture)
+        || quiet_count != quiets.size()) {
+        return;
+    }
+
+    QuietHistory history;
+    history.update(
+      position.piece_on(quiets[2].from()),
+      quiets[2].to(),
+      QuietHistory::LIMIT);
+
+    MoveList precedence;
+    precedence.push_back(quiets[0]);
+    precedence.push_back(quiets[2]);
+    precedence.push_back(capture);
+    precedence.push_back(quiets[1]);
+    MoveOrderingBuffer buffer;
+    order_moves(
+      position,
+      precedence,
+      buffer,
+      history);
+    expect(
+      precedence[0] == capture
+        && precedence[1] == quiets[2]
+        && precedence[2] == quiets[0]
+        && precedence[3] == quiets[1],
+      "a tactical move precedes a quiet move at maximum history");
+
+    history.clear();
+    constexpr HistoryScore tied_score = 512;
+    history.update(
+      position.piece_on(quiets[0].from()),
+      quiets[0].to(),
+      tied_score);
+    history.update(
+      position.piece_on(quiets[1].from()),
+      quiets[1].to(),
+      tied_score);
+    history.update(
+      position.piece_on(quiets[2].from()),
+      quiets[2].to(),
+      -tied_score);
+
+    MoveList stable;
+    stable.push_back(quiets[1]);
+    stable.push_back(quiets[2]);
+    stable.push_back(capture);
+    stable.push_back(quiets[0]);
+    order_moves(
+      position,
+      stable,
+      buffer,
+      history);
+    expect(
+      stable[0] == capture
+        && stable[1] == quiets[1]
+        && stable[2] == quiets[0]
+        && stable[3] == quiets[2],
+      "equal quiet-history scores retain their existing relative order");
+
+    MoveList preferred;
+    preferred.push_back(quiets[1]);
+    preferred.push_back(quiets[2]);
+    preferred.push_back(capture);
+    preferred.push_back(quiets[0]);
+    order_moves(
+      position,
+      preferred,
+      buffer,
+      history,
+      quiets[2]);
+    expect(
+      preferred[0] == quiets[2]
+        && preferred[1] == capture
+        && preferred[2] == quiets[1]
+        && preferred[3] == quiets[0],
+      "a validated preferred quiet move precedes tactical and history order");
+    expect(
+      positions_equal(position, original),
+      "quiet-history ordering preserves every position field");
+}
+
 void test_preferred_move_ordering() {
     Position position =
       material_tactic_position();
@@ -1204,6 +1463,327 @@ void test_preferred_move_ordering() {
     expect(
       positions_equal(position, original),
       "preferred move ordering preserves every position field");
+}
+
+void test_aliased_quiet_cutoff_history() {
+    Position position =
+      quiet_history_alias_position();
+    const Position original = position;
+    PositionHistory history{position.key()};
+    constexpr Move first_alias = Move::normal(
+      make_square(FILE_E, RANK_4),
+      make_square(FILE_F, RANK_6));
+    constexpr Move cutoff_alias = Move::normal(
+      make_square(FILE_G, RANK_4),
+      make_square(FILE_F, RANK_6));
+    constexpr Square shared_destination =
+      make_square(FILE_F, RANK_6);
+
+    MoveList legal_moves;
+    generate_legal_moves(position, legal_moves);
+    expect(
+      contains_move(legal_moves, first_alias)
+        && contains_move(
+             legal_moves, cutoff_alias)
+        && !is_tactical_move(
+             position, first_alias)
+        && !is_tactical_move(
+             position, cutoff_alias),
+      "the alias fixture contains both quiet knight moves");
+    if (!contains_move(legal_moves, first_alias)
+        || !contains_move(
+             legal_moves, cutoff_alias)) {
+        return;
+    }
+
+    SearchDetail::SearchState state;
+    for (const Move move : legal_moves) {
+        if (is_tactical_move(position, move)) {
+            continue;
+        }
+
+        const Piece piece =
+          position.piece_on(move.from());
+        if (piece == R_KNIGHT
+            && move.to() == shared_destination) {
+            continue;
+        }
+
+        state.quiet_history.update(
+          piece,
+          move.to(),
+          -QuietHistory::LIMIT);
+    }
+
+    MoveList ordered = legal_moves;
+    order_moves(
+      position,
+      ordered,
+      state.ordering_buffer,
+      state.quiet_history,
+      first_alias);
+    expect(
+      ordered.size() >= 2
+        && ordered[0] == first_alias
+        && ordered[1] == cutoff_alias,
+      "the preferred aliased quiet precedes the unpenalized cutoff alias");
+
+    const auto result =
+      SearchDetail::alpha_beta(
+        position,
+        history,
+        1,
+        0,
+        -INFINITE_SCORE,
+        DRAW_SCORE,
+        state,
+        first_alias);
+    expect(
+      result
+        && result->score == Score{140}
+        && result->best_move == cutoff_alias
+        && state.nodes == 4,
+      "the second aliased quiet move produces the depth-one beta cutoff");
+    expect(
+      state.quiet_history.score(
+        R_KNIGHT, shared_destination)
+        == QuietHistory::depth_bonus(1),
+      "an earlier aliased quiet does not penalize the cutoff history entry");
+    expect(
+      positions_equal(position, original)
+        && history.size() == 1
+        && history.current_key()
+             == position.key(),
+      "aliased cutoff search restores position and history");
+}
+
+void test_quiet_history_cutoff_training() {
+    constexpr std::array<std::size_t, COLOR_NB>
+      TARGET_INDEXES = {6, 6, 1, 1};
+    constexpr std::array<std::uint64_t, COLOR_NB>
+      FIRST_SEARCH_NODES = {134, 142, 68, 68};
+    constexpr std::uint64_t TRAINED_SEARCH_NODES = 50;
+    constexpr HistoryScore DEPTH_THREE_BONUS =
+      QuietHistory::depth_bonus(3);
+
+    Position position =
+      quiet_history_cutoff_position();
+    Move target = Move::normal(
+      make_square(FILE_N, RANK_4),
+      make_square(FILE_G, RANK_11));
+
+    for (int rotation = 0;
+         rotation < COLOR_NB;
+         ++rotation) {
+        const std::size_t rotation_index =
+          static_cast<std::size_t>(rotation);
+        const Position original = position;
+        PositionHistory history{position.key()};
+        const Piece target_piece =
+          position.piece_on(target.from());
+
+        MoveList generated;
+        generate_legal_moves(position, generated);
+        MoveList initial_order = generated;
+        order_moves(position, initial_order);
+
+        std::size_t target_index =
+          initial_order.size();
+        bool all_quiet = true;
+        for (std::size_t index = 0;
+             index < initial_order.size();
+             ++index) {
+            const Move move = initial_order[index];
+            if (is_tactical_move(position, move))
+                all_quiet = false;
+            if (move == target)
+                target_index = index;
+        }
+
+        expect(
+          initial_order.size() == 16
+            && all_quiet
+            && target_index
+                 == TARGET_INDEXES[rotation_index],
+          "the rotated cutoff fixture has the expected initial quiet order");
+
+        const SearchResult exact =
+          search(position, history, 3);
+        expect(
+          exact.score == BISHOP_VALUE
+            && exact.best_move == target,
+          "the rotated quiet cutoff move is the depth-three exact best move");
+
+        SearchDetail::SearchState state;
+        const auto first =
+          SearchDetail::alpha_beta(
+            position,
+            history,
+            3,
+            0,
+            Score{-1},
+            DRAW_SCORE,
+            state);
+        expect(
+          first
+            && first->score
+                 == BISHOP_VALUE - PAWN_VALUE
+            && first->best_move == target
+            && state.nodes
+                 == FIRST_SEARCH_NODES[
+                      rotation_index],
+          "a later quiet move produces the expected null-window beta cutoff");
+        if (!first)
+            return;
+
+        bool root_updates_match = true;
+        for (std::size_t index = 0;
+             index < initial_order.size();
+             ++index) {
+            const Move move = initial_order[index];
+            const HistoryScore expected =
+              index < target_index
+                ? -DEPTH_THREE_BONUS
+              : index == target_index
+                ? DEPTH_THREE_BONUS
+                : HistoryScore{0};
+            if (state.quiet_history.score(
+                  position.piece_on(
+                    move.from()),
+                  move.to())
+                != expected) {
+                root_updates_match = false;
+            }
+        }
+        expect(
+          root_updates_match,
+          "a quiet cutoff rewards its move and penalizes only "
+          "earlier quiet siblings");
+
+        MoveList trained_order = generated;
+        order_moves(
+          position,
+          trained_order,
+          state.ordering_buffer,
+          state.quiet_history);
+        expect(
+          !trained_order.empty()
+            && trained_order[0] == target,
+          "the rewarded quiet cutoff leads the next root ordering");
+
+        const std::uint64_t first_nodes =
+          state.nodes;
+        const auto trained =
+          SearchDetail::alpha_beta(
+            position,
+            history,
+            3,
+            0,
+            Score{-1},
+            DRAW_SCORE,
+            state);
+        const std::uint64_t trained_nodes =
+          state.nodes - first_nodes;
+        expect(
+          trained
+            && trained->score == first->score
+            && trained->best_move == target
+            && trained_nodes
+                 == TRAINED_SEARCH_NODES
+            && trained_nodes < first_nodes,
+          "trained quiet ordering reduces the repeated null-window search");
+        expect(
+          state.quiet_history.score(
+            target_piece, target.to())
+            == HistoryScore{571},
+          "a repeated quiet cutoff applies a second gravity reward");
+
+        const std::uint64_t interrupted_limit =
+          FIRST_SEARCH_NODES[rotation_index]
+          - 1;
+        SearchDetail::SearchBudget budget{
+          interrupted_limit,
+          std::nullopt};
+        SearchDetail::LimitedSearchState
+          interrupted_state{
+            std::move(budget)};
+        PositionHistory interrupted_history{
+          position.key()};
+        const auto interrupted =
+          SearchDetail::alpha_beta(
+            position,
+            interrupted_history,
+            3,
+            0,
+            Score{-1},
+            DRAW_SCORE,
+            interrupted_state);
+
+        bool interrupted_root_history_zero = true;
+        for (const Move move : generated) {
+            if (interrupted_state
+                  .quiet_history.score(
+                    position.piece_on(
+                      move.from()),
+                    move.to())
+                != 0) {
+                interrupted_root_history_zero =
+                  false;
+            }
+        }
+        expect(
+          !interrupted
+            && interrupted.error()
+                 == SearchStopReason::NODE_LIMIT
+            && interrupted_state.nodes
+                 == interrupted_limit
+            && interrupted_root_history_zero,
+          "an interrupted cutoff child cannot update root-player "
+          "quiet history");
+
+        SearchDetail::SearchBudget exact_budget{
+          FIRST_SEARCH_NODES[rotation_index],
+          std::nullopt};
+        SearchDetail::LimitedSearchState
+          exact_state{
+            std::move(exact_budget)};
+        PositionHistory exact_history{
+          position.key()};
+        const auto exact_limit =
+          SearchDetail::alpha_beta(
+            position,
+            exact_history,
+            3,
+            0,
+            Score{-1},
+            DRAW_SCORE,
+            exact_state);
+        expect(
+          exact_limit
+            && exact_state.nodes
+                 == FIRST_SEARCH_NODES[
+                      rotation_index]
+            && exact_state.quiet_history.score(
+                 target_piece, target.to())
+                 == DEPTH_THREE_BONUS,
+          "the exact node boundary completes and trains the quiet cutoff");
+        expect(
+          positions_equal(position, original)
+            && history.size() == 1
+            && history.current_key()
+                 == position.key()
+            && interrupted_history.size() == 1
+            && interrupted_history.current_key()
+                 == position.key()
+            && exact_history.size() == 1
+            && exact_history.current_key()
+                 == position.key(),
+          "completed and interrupted quiet-history searches restore "
+          "all root state");
+
+        position = rotate_clockwise(position);
+        target = rotate_clockwise(target);
+    }
 }
 
 struct ReferenceResult {
@@ -1438,7 +2018,11 @@ int main() {
     test_stable_equal_scores();
     test_en_passant_capture_values();
     test_en_passant_promotions();
+    test_quiet_history_table();
+    test_quiet_history_ordering();
     test_preferred_move_ordering();
+    test_aliased_quiet_cutoff_history();
+    test_quiet_history_cutoff_training();
     test_search_integration();
 
     if (failures != 0) {

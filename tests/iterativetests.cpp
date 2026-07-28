@@ -958,7 +958,7 @@ void test_aspiration_researches() {
                  == IterativeStop::DEPTH_LIMIT
             && result.last_completed
             && result.last_completed->depth == 2
-            && result.last_completed->attempts >= 4
+            && result.last_completed->attempts >= 3
             && result.last_completed->result.score
                  == depth_two.score
             && result.last_completed->result.has_move(),
@@ -996,28 +996,30 @@ void test_previous_result_and_table_ordering() {
 
     expect(
       fixed_one.nodes == 52
-        && fixed_two.nodes == 436
-        && depth_two.total_nodes == 315
+        && fixed_two.nodes == 347
+        && depth_two.total_nodes == 155
         && depth_two.last_completed
         && depth_two.last_completed->attempts == 1
         && depth_two.last_completed->result.nodes
-             == 263
+             == 103
         && depth_two.last_completed->result.score
              == fixed_two.score
         && depth_two.last_completed->result.best_move
              == fixed_two.best_move,
-      "root ordering and aspiration reduce depth-two search work");
+      "history-assisted search has the expected "
+      "depth-two result and node shape");
     expect(
-      fixed_three.nodes == 1738
-        && depth_three.total_nodes == 1563
+      fixed_three.nodes == 970
+        && depth_three.total_nodes == 1145
         && depth_three.last_completed
         && depth_three.last_completed->result.nodes
-             == 1248
+             == 990
         && depth_three.last_completed->result.score
              == fixed_three.score
         && depth_three.last_completed->result.best_move
              == fixed_three.best_move,
-      "cached ordering and aspiration reduce deeper iterative search work");
+      "history-assisted search has the expected "
+      "depth-three result and node shape");
 
     const std::uint64_t complete_limit =
       depth_two.total_nodes;
