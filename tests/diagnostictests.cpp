@@ -9,6 +9,7 @@
 #include <string>
 #include <string_view>
 
+#include "benchmark.h"
 #include "notation.h"
 #include "perft.h"
 #include "setup.h"
@@ -35,6 +36,7 @@ inline constexpr std::string_view HELP_TEXT =
   "  show\n"
   "  perft <depth>\n"
   "  divide <depth>\n"
+  "  bench\n"
   "  help\n"
   "  quit\n";
 
@@ -236,6 +238,53 @@ void test_analysis_preserves_loaded_state() {
       "core analysis expectations preserve their positions");
 }
 
+void test_benchmark_preserves_loaded_state() {
+    const std::string notation =
+      serialize_position(custom_position());
+    const DiagnosticResult result =
+      run(
+        "position " + notation
+        + "\nbench\nshow\nquit\n");
+    const BenchmarkCorpus corpus =
+      benchmark_corpus();
+    const std::string expected_suffix =
+      notation + "\n";
+
+    expect(result.status == EXIT_SUCCESS,
+           "benchmark command returns success");
+    expect(
+      result.output.starts_with(
+        "Position loaded\n"),
+      "benchmark follows the position-load acknowledgement");
+    for (const BenchmarkCase& benchmark_case :
+         corpus) {
+        expect(
+          result.output.find(
+            std::string(benchmark_case.name)
+            + ": depth ")
+            != std::string::npos,
+          "benchmark output contains every corpus label");
+    }
+    expect(
+      result.output.find(
+        "Positions: "
+        + std::to_string(BENCHMARK_CASE_COUNT)
+        + "\n")
+        != std::string::npos
+        && result.output.find("Total nodes: ")
+             != std::string::npos
+        && result.output.find("Checksum: ")
+             != std::string::npos
+        && result.output.find("Elapsed (ms): ")
+             != std::string::npos,
+      "benchmark output contains every summary field");
+    expect(
+      result.output.ends_with(expected_suffix),
+      "benchmark leaves the loaded diagnostic position unchanged");
+    expect(result.errors.empty(),
+           "benchmark command writes no errors");
+}
+
 void test_whitespace_and_blank_lines() {
     const std::string starting =
       serialize_position(make_starting_position());
@@ -304,6 +353,7 @@ void test_forbidden_trailing_arguments() {
     const DiagnosticResult result =
       run(
         "show extra\n"
+        "bench extra\n"
         "help extra\n"
         "quit extra\n"
         "show\n");
@@ -315,6 +365,7 @@ void test_forbidden_trailing_arguments() {
     expect(
       result.errors
         == "error: show takes no arguments\n"
+           "error: bench takes no arguments\n"
            "error: help takes no arguments\n"
            "error: quit takes no arguments\n",
       "forbidden trailing-argument errors are exact");
@@ -431,6 +482,7 @@ int main() {
     test_perft_depths();
     test_divide_output();
     test_analysis_preserves_loaded_state();
+    test_benchmark_preserves_loaded_state();
     test_whitespace_and_blank_lines();
     test_help();
     test_quit_suppresses_later_commands();

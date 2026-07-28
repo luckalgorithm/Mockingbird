@@ -11,6 +11,7 @@
 #include <string_view>
 #include <system_error>
 
+#include "benchmark.h"
 #include "notation.h"
 #include "perft.h"
 #include "setup.h"
@@ -26,6 +27,7 @@ inline constexpr std::string_view HELP_TEXT =
   "  show\n"
   "  perft <depth>\n"
   "  divide <depth>\n"
+  "  bench\n"
   "  help\n"
   "  quit\n";
 
@@ -238,6 +240,28 @@ int run_diagnostic(
             const PerftList entries =
               perft_divide(position, depth);
             write_text(output, format_perft_divide(entries));
+            write_text(output, "\n");
+            continue;
+        }
+
+        if (command.name == "bench") {
+            if (!command.arguments.empty()) {
+                write_no_argument_error(errors, "bench");
+                continue;
+            }
+
+            const BenchmarkRunResult result =
+              run_benchmark();
+            if (!result) {
+                write_text(
+                  errors,
+                  "error: benchmark failed\n");
+                continue;
+            }
+
+            write_text(
+              output,
+              format_benchmark(*result));
             write_text(output, "\n");
             continue;
         }
