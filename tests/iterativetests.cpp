@@ -995,9 +995,9 @@ void test_previous_result_and_table_ordering() {
         depth_limits(3));
 
     expect(
-      fixed_one.nodes == 46
-        && fixed_two.nodes == 473
-        && depth_two.total_nodes == 309
+      fixed_one.nodes == 52
+        && fixed_two.nodes == 436
+        && depth_two.total_nodes == 315
         && depth_two.last_completed
         && depth_two.last_completed->attempts == 1
         && depth_two.last_completed->result.nodes
@@ -1008,8 +1008,8 @@ void test_previous_result_and_table_ordering() {
              == fixed_two.best_move,
       "root ordering and aspiration reduce depth-two search work");
     expect(
-      fixed_three.nodes == 2234
-        && depth_three.total_nodes == 1557
+      fixed_three.nodes == 1738
+        && depth_three.total_nodes == 1563
         && depth_three.last_completed
         && depth_three.last_completed->result.nodes
              == 1248

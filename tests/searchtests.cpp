@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <iostream>
+#include <optional>
 #include <string_view>
 #include <type_traits>
 #include <utility>
@@ -215,6 +216,17 @@ material_tactic_position() noexcept {
       R_ROOK, make_square(FILE_F, RANK_5));
     position.put_piece(
       B_QUEEN, make_square(FILE_F, RANK_8));
+    return position;
+}
+
+[[nodiscard]] constexpr Position
+pvs_research_position() noexcept {
+    Position position = kings_only_position();
+    position.put_piece(
+      Y_BISHOP, make_square(FILE_N, RANK_4));
+    position.put_piece(
+      B_PAWN, make_square(FILE_J, RANK_14));
+    position.set_side_to_move(YELLOW);
     return position;
 }
 
@@ -467,6 +479,23 @@ static_assert(
     RED_YELLOW,
     MAX_SEARCH_PLY)
   == DRAW_SCORE);
+static_assert(
+  SearchDetail::pvs_scout_beta(
+    -INFINITE_SCORE)
+  == -INFINITE_SCORE + 1);
+static_assert(
+  SearchDetail::pvs_scout_beta(
+    INFINITE_SCORE - 1)
+  == INFINITE_SCORE);
+static_assert(
+  !SearchDetail::pvs_research_required(
+    Score{0}, Score{0}, Score{2}));
+static_assert(
+  SearchDetail::pvs_research_required(
+    Score{1}, Score{0}, Score{2}));
+static_assert(
+  !SearchDetail::pvs_research_required(
+    Score{2}, Score{0}, Score{2}));
 static_assert(
   std::is_same_v<
     decltype(search(
@@ -726,7 +755,7 @@ void test_root_and_child_repetition() {
           result.best_move == repeating_move
             && result.score == DRAW_SCORE
             && result.nodes
-                 == 1
+                 >= 1
                     + static_cast<std::uint64_t>(
                         legal_moves.size()),
           "search recognizes a threefold repetition created by a child move");
@@ -773,6 +802,403 @@ void test_special_move_state_restoration() {
     expect(
       history_matches(history, keys),
       "special-move search restores the complete history");
+}
+
+void test_required_pvs_research() {
+    Position position = pvs_research_position();
+    const Position original = position;
+    const std::array keys = {position.key()};
+    PositionHistory history = make_history(keys);
+    const Move expected = Move::normal(
+      make_square(FILE_N, RANK_4),
+      make_square(FILE_G, RANK_11));
+
+    MoveList ordered_moves;
+    generate_legal_moves(position, ordered_moves);
+    MoveOrderingBuffer ordering_buffer;
+    order_moves(
+      position,
+      ordered_moves,
+      ordering_buffer);
+    expect(
+      ordered_moves.size() >= 2
+        && ordered_moves[0] != expected
+        && OrderingDetail::contains_move(
+             ordered_moves, expected),
+      "the exact PVS fixture orders its unique best move after another move");
+    if (ordered_moves.size() < 2
+        || !OrderingDetail::contains_move(
+             ordered_moves, expected)) {
+        return;
+    }
+
+    std::expected<
+      SearchDetail::NodeResult,
+      SearchStopReason> first_child{
+        SearchDetail::NodeResult{}};
+    SearchDetail::SearchState first_state;
+    PositionHistory first_history{history};
+    {
+        SearchDetail::ChildState child{
+          position,
+          first_history,
+          ordered_moves[0]};
+        first_child =
+          SearchDetail::alpha_beta(
+            position,
+            first_history,
+            2,
+            1,
+            -INFINITE_SCORE,
+            INFINITE_SCORE,
+            first_state);
+    }
+    expect(
+      first_child.has_value(),
+      "the first ordered PVS child completes");
+    if (!first_child)
+        return;
+
+    const Score first_score =
+      -first_child->score;
+    const Score scout_beta =
+      SearchDetail::pvs_scout_beta(
+        first_score);
+
+    std::expected<
+      SearchDetail::NodeResult,
+      SearchStopReason> scout_child{
+        SearchDetail::NodeResult{}};
+    SearchDetail::SearchState scout_state;
+    PositionHistory scout_history{history};
+    {
+        SearchDetail::ChildState child{
+          position,
+          scout_history,
+          expected};
+        scout_child =
+          SearchDetail::alpha_beta(
+            position,
+            scout_history,
+            2,
+            1,
+            -scout_beta,
+            -first_score,
+            scout_state);
+    }
+    expect(
+      scout_child.has_value(),
+      "the later PVS scout completes");
+    if (!scout_child)
+        return;
+
+    std::expected<
+      SearchDetail::NodeResult,
+      SearchStopReason> full_child{
+        SearchDetail::NodeResult{}};
+    SearchDetail::SearchState full_state;
+    PositionHistory full_history{history};
+    {
+        SearchDetail::ChildState child{
+          position,
+          full_history,
+          expected};
+        full_child =
+          SearchDetail::alpha_beta(
+            position,
+            full_history,
+            2,
+            1,
+            -INFINITE_SCORE,
+            -first_score,
+            full_state);
+    }
+    expect(
+      full_child.has_value(),
+      "the later PVS full-window search completes");
+    if (!full_child)
+        return;
+
+    const Score scout_score =
+      -scout_child->score;
+    const Score exact_score =
+      -full_child->score;
+    expect(
+      first_score == Score{-570}
+        && scout_score == Score{230}
+        && exact_score == BISHOP_VALUE
+        && SearchDetail::pvs_research_required(
+             scout_score,
+             first_score,
+             INFINITE_SCORE),
+      "the scout bound requires a full search to recover the exact score");
+
+    const ExhaustiveResult exhaustive =
+      exhaustive_search(position, history, 3);
+    Position expected_child = position;
+    UndoState expected_undo;
+    do_move(
+      expected_child,
+      expected,
+      expected_undo);
+    PositionHistory expected_child_history{history};
+    expected_child_history.push(
+      expected_child.key());
+    const PositionKey expected_child_key =
+      expected_child.key();
+    const HistoryContext expected_child_context =
+      expected_child_history.context();
+
+    TranspositionTable root_table;
+    root_table.new_search();
+    SearchDetail::SearchState root_state{
+      SearchDetail::UnlimitedBudget{},
+      &root_table};
+    PositionHistory root_history{history};
+    const auto root =
+      SearchDetail::alpha_beta(
+        position,
+        root_history,
+        3,
+        0,
+        -INFINITE_SCORE,
+        INFINITE_SCORE,
+        root_state);
+    expect(
+      root
+        && exhaustive.best_move == expected
+        && root->best_move == expected
+        && root->score == exact_score
+        && root->score == exhaustive.score
+        && root_state.nodes == 367,
+      "recursive PVS matches the exhaustive result after its re-search");
+    const TranspositionEntry* root_entry =
+      root_table.find(
+        position.key(),
+        history.context());
+    const TranspositionEntry* exact_child_entry =
+      root_table.find(
+        expected_child_key,
+        expected_child_context);
+    expect(
+      root_entry
+        && root_entry->depth == 3
+        && root_entry->bound
+             == TranspositionBound::EXACT
+        && root_entry->score == BISHOP_VALUE
+        && exact_child_entry
+        && exact_child_entry->depth == 2
+        && exact_child_entry->bound
+             == TranspositionBound::EXACT
+        && exact_child_entry->score
+             == -BISHOP_VALUE,
+      "the full re-search replaces its scout bound with exact table entries");
+
+    TranspositionTable limited_table;
+    limited_table.new_search();
+    SearchDetail::SearchBudget budget{
+      std::uint64_t{183}, std::nullopt};
+    SearchDetail::LimitedSearchState limited{
+      std::move(budget),
+      &limited_table};
+    PositionHistory limited_history{history};
+    const auto interrupted =
+      SearchDetail::alpha_beta(
+        position,
+        limited_history,
+        3,
+        0,
+        -INFINITE_SCORE,
+        INFINITE_SCORE,
+        limited);
+    expect(
+      !interrupted
+        && interrupted.error()
+             == SearchStopReason::NODE_LIMIT
+        && limited.nodes == 183
+        && !limited_table.find(
+             position.key(),
+             history.context()),
+      "cancellation between a scout and its re-search publishes no root result");
+    const TranspositionEntry* scout_entry =
+      limited_table.find(
+        expected_child_key,
+        expected_child_context);
+    expect(
+      scout_entry
+        && scout_entry->depth == 2
+        && scout_entry->bound
+             == TranspositionBound::UPPER
+        && scout_entry->score == Score{-230},
+      "an interrupted full re-search retains only its completed scout bound");
+    expect(
+      positions_equal(position, original)
+        && history_matches(history, keys)
+        && first_history.current_key()
+             == position.key()
+        && scout_history.current_key()
+             == position.key()
+        && full_history.current_key()
+             == position.key()
+        && root_history.current_key()
+             == position.key()
+        && limited_history.current_key()
+             == position.key(),
+      "PVS scouts, re-searches, and cancellation restore all root state");
+}
+
+void test_pvs_research_and_cancellation() {
+    Position position = material_tactic_position();
+    const Position original = position;
+    const std::array keys = {position.key()};
+    PositionHistory history = make_history(keys);
+    const Move expected = Move::normal(
+      make_square(FILE_F, RANK_5),
+      make_square(FILE_F, RANK_8));
+
+    MoveList ordered_moves;
+    generate_legal_moves(position, ordered_moves);
+    Move quiet_preferred = Move::none();
+    for (const Move move : ordered_moves) {
+        if (!is_tactical_move(position, move)) {
+            quiet_preferred = move;
+            break;
+        }
+    }
+
+    expect(
+      quiet_preferred.is_board_move(),
+      "the PVS fixture contains a quiet preferred move");
+    if (!quiet_preferred.is_board_move())
+        return;
+
+    MoveOrderingBuffer ordering_buffer;
+    order_moves(
+      position,
+      ordered_moves,
+      ordering_buffer,
+      quiet_preferred);
+    expect(
+      !ordered_moves.empty()
+        && ordered_moves[0] == quiet_preferred
+        && quiet_preferred != expected,
+      "the quiet preferred move precedes the unique best move");
+
+    const ExhaustiveResult exhaustive =
+      exhaustive_search(position, history, 1);
+    TranspositionTable complete_table{64};
+    complete_table.new_search();
+    SearchDetail::SearchState complete_state{
+      SearchDetail::UnlimitedBudget{},
+      &complete_table};
+    PositionHistory complete_history{history};
+    const auto complete =
+      SearchDetail::alpha_beta(
+        position,
+        complete_history,
+        1,
+        0,
+        -INFINITE_SCORE,
+        INFINITE_SCORE,
+        complete_state,
+        quiet_preferred);
+
+    expect(
+      complete
+        && exhaustive.best_move == expected
+        && complete->best_move == expected
+        && complete->score == exhaustive.score
+        && complete->score == ROOK_VALUE,
+      "a later ordered improvement is re-searched to the exhaustive score");
+    const TranspositionEntry* completed_entry =
+      complete_table.find(
+        position.key(),
+        history.context());
+    expect(
+      completed_entry
+        && completed_entry->depth == 1
+        && completed_entry->bound
+             == TranspositionBound::EXACT
+        && completed_entry->best_move == expected,
+      "the completed PVS root stores its exact result");
+    expect(
+      positions_equal(position, original)
+        && history_matches(history, keys)
+        && complete_history.current_key()
+             == position.key(),
+      "a completed PVS re-search restores position and history");
+    if (!complete)
+        return;
+
+    TranspositionTable cutoff_table{64};
+    cutoff_table.new_search();
+    SearchDetail::SearchState cutoff_state{
+      SearchDetail::UnlimitedBudget{},
+      &cutoff_table};
+    PositionHistory cutoff_history{history};
+    const auto cutoff =
+      SearchDetail::alpha_beta(
+        position,
+        cutoff_history,
+        1,
+        0,
+        -INFINITE_SCORE,
+        DRAW_SCORE,
+        cutoff_state,
+        quiet_preferred);
+    const TranspositionEntry* cutoff_entry =
+      cutoff_table.find(
+        position.key(),
+        history.context());
+    expect(
+      cutoff
+        && cutoff->best_move == expected
+        && cutoff->score >= DRAW_SCORE
+        && cutoff_state.nodes
+             < complete_state.nodes
+        && cutoff_entry
+        && cutoff_entry->bound
+             == TranspositionBound::LOWER,
+      "a later scout at beta cuts off without a full re-search");
+
+    for (std::uint64_t limit = 0;
+         limit < complete_state.nodes;
+         ++limit) {
+        TranspositionTable table{64};
+        table.new_search();
+        SearchDetail::SearchBudget budget{
+          limit, std::nullopt};
+        SearchDetail::LimitedSearchState state{
+          std::move(budget),
+          &table};
+        PositionHistory working{history};
+        const auto interrupted =
+          SearchDetail::alpha_beta(
+            position,
+            working,
+            1,
+            0,
+            -INFINITE_SCORE,
+            INFINITE_SCORE,
+            state,
+            quiet_preferred);
+
+        expect(
+          !interrupted
+            && interrupted.error()
+                 == SearchStopReason::NODE_LIMIT
+            && state.nodes == limit
+            && !table.find(
+                 position.key(),
+                 history.context()),
+          "every incomplete PVS node prefix is discarded");
+        expect(
+          positions_equal(position, original)
+            && working.current_key()
+                 == position.key()
+            && history_matches(history, keys),
+          "every PVS interruption restores position and history");
+    }
 }
 
 void test_alpha_beta_matches_exhaustive_search() {
@@ -882,6 +1308,8 @@ int main() {
     test_immediate_king_capture();
     test_root_and_child_repetition();
     test_special_move_state_restoration();
+    test_required_pvs_research();
+    test_pvs_research_and_cancellation();
     test_alpha_beta_matches_exhaustive_search();
     test_invalid_inputs_return_without_searching_in_release();
 

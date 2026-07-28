@@ -76,6 +76,23 @@ classify_bound(
     return TranspositionBound::EXACT;
 }
 
+[[nodiscard]] constexpr Score
+pvs_scout_beta(Score alpha) noexcept {
+    assert(alpha < INFINITE_SCORE);
+    return alpha + Score{1};
+}
+
+// A scout score in the open interval (alpha, beta) raises alpha without
+// reaching the caller's beta bound.
+[[nodiscard]] constexpr bool
+pvs_research_required(
+  Score score,
+  Score alpha,
+  Score beta) noexcept {
+    assert(alpha < beta);
+    return score > alpha && score < beta;
+}
+
 template<typename State>
 [[nodiscard]] inline
 std::expected<NodeResult, SearchStopReason>
@@ -198,6 +215,7 @@ alpha_beta(
 
     Score best_score = -INFINITE_SCORE;
     Move best_move = Move::none();
+    bool first_move = true;
 
     // Strict score comparison preserves the first searched move among moves
     // that receive equal search scores.
@@ -209,14 +227,45 @@ alpha_beta(
             ChildState child{position, history, move};
             // Every move advances to the opposing team, so the child score
             // and child window are negated for the parent perspective.
-            child_result = alpha_beta(
-              position,
-              history,
-              depth - 1,
-              ply + 1,
-              -beta,
-              -alpha,
-              state);
+            if (first_move) {
+                child_result = alpha_beta(
+                  position,
+                  history,
+                  depth - 1,
+                  ply + 1,
+                  -beta,
+                  -alpha,
+                  state);
+            } else {
+                const Score scout_beta =
+                  pvs_scout_beta(alpha);
+                child_result = alpha_beta(
+                  position,
+                  history,
+                  depth - 1,
+                  ply + 1,
+                  -scout_beta,
+                  -alpha,
+                  state);
+
+                if (child_result) {
+                    const Score scout_score =
+                      -child_result->score;
+                    if (pvs_research_required(
+                          scout_score,
+                          alpha,
+                          beta)) {
+                        child_result = alpha_beta(
+                          position,
+                          history,
+                          depth - 1,
+                          ply + 1,
+                          -beta,
+                          -alpha,
+                          state);
+                    }
+                }
+            }
         }
 
         if (!child_result)
@@ -225,6 +274,7 @@ alpha_beta(
 
         const Score candidate_score =
           -child_result->score;
+        first_move = false;
 
         if (candidate_score > best_score) {
             best_score = candidate_score;
@@ -304,11 +354,12 @@ alpha_beta(
 
 }  // namespace SearchDetail
 
-// Returns the fixed-depth negamax result. At the nominal horizon, quiescence
-// continues captures, promotions, and every legal check evasion. Terminal
-// positions end a line before evaluation, and alpha-beta bounds can prune
-// lines that cannot affect the result. The position is restored before
-// return, and history is read-only.
+// Returns the fixed-depth negamax result. The first ordered move at each main
+// node uses the caller's complete window. Later moves use a null window and
+// re-search when they raise alpha without reaching beta. At the nominal
+// horizon, quiescence continues captures, promotions, and every legal check
+// evasion. Terminal positions end a line before evaluation. The position is
+// restored before return, and history is read-only.
 // Preconditions:
 // - depth is in the inclusive range 0..MAX_SEARCH_DEPTH;
 // - history.current_key() equals position.key();
