@@ -34,6 +34,11 @@ struct NodeResult {
 
 inline constexpr Score TABLE_MATE_THRESHOLD =
   MATE_SCORE - MAX_SEARCH_PLY;
+inline constexpr int LATE_MOVE_REDUCTION = 1;
+inline constexpr int LATE_MOVE_MIN_DEPTH = 4;
+
+// Quiet ordinals are zero-based, so ordinal four is the fifth quiet move.
+inline constexpr std::size_t LATE_MOVE_MIN_QUIET_ORDINAL = 4;
 
 // Mate scores are stored relative to the current node and reconstructed for
 // the probing node's distance from the root.
@@ -83,6 +88,91 @@ pvs_scout_beta(Score alpha) noexcept {
     return alpha + Score{1};
 }
 
+[[nodiscard]] constexpr bool is_null_window(
+  Score alpha,
+  Score beta) noexcept {
+    assert(alpha < beta);
+    return beta == alpha + Score{1};
+}
+
+[[nodiscard]] constexpr bool is_mate_score_window(
+  Score alpha,
+  Score beta) noexcept {
+    assert(alpha < beta);
+    return alpha <= -TABLE_MATE_THRESHOLD
+        || beta >= TABLE_MATE_THRESHOLD;
+}
+
+// The one-ply reduction applies at depth four or greater to the fifth or later
+// quiet move in a null window. Only ordinary knight, bishop, rook, and queen
+// moves with non-positive history are eligible. Checked nodes, mate-score
+// windows, killers, and child positions with a checked opposing king return
+// zero.
+[[nodiscard]] constexpr int late_move_reduction(
+  int depth,
+  std::size_t quiet_ordinal,
+  bool null_window,
+  bool checked,
+  bool quiet,
+  MoveType move_type,
+  PieceType moving_piece_type,
+  KillerPriority killer_priority,
+  HistoryScore history_score,
+  bool mate_score_window,
+  bool opposing_king_checked) noexcept {
+    assert(depth > 0);
+    assert(is_ok(move_type));
+    assert(is_ok(moving_piece_type));
+
+    if (depth < LATE_MOVE_MIN_DEPTH
+        || quiet_ordinal
+             < LATE_MOVE_MIN_QUIET_ORDINAL
+        || !null_window
+        || checked
+        || !quiet
+        || move_type != MoveType::NORMAL
+        || moving_piece_type < KNIGHT
+        || moving_piece_type > QUEEN
+        || killer_priority != 0
+        || history_score > 0
+        || mate_score_window
+        || opposing_king_checked) {
+        return 0;
+    }
+
+    return LATE_MOVE_REDUCTION;
+}
+
+// Returns whether at least one king belonging to team is currently checked.
+[[nodiscard]] constexpr bool team_has_checked_king(
+  const Position& position,
+  Team team) noexcept {
+    assert(is_ok(team));
+
+    for (int color_index = 0;
+         color_index < COLOR_NB;
+         ++color_index) {
+        const Color color = Color(color_index);
+        if (team_of(color) == team
+            && in_check(position, color)) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+// A reduced result above alpha is not used until the same move completes a
+// scout search at the nominal depth.
+[[nodiscard]] constexpr bool lmr_verification_required(
+  int reduction,
+  Score score,
+  Score alpha) noexcept {
+    assert(reduction >= 0);
+    assert(reduction <= LATE_MOVE_REDUCTION);
+    return reduction != 0 && score > alpha;
+}
+
 // A scout score in the open interval (alpha, beta) raises alpha without
 // reaching the caller's beta bound.
 [[nodiscard]] constexpr bool
@@ -94,7 +184,7 @@ pvs_research_required(
     return score > alpha && score < beta;
 }
 
-template<typename State>
+template<bool EnableLateMoveReductions = true, typename State>
 [[nodiscard]] inline
 std::expected<NodeResult, SearchStopReason>
 alpha_beta(
@@ -140,6 +230,19 @@ alpha_beta(
 
     const Score original_alpha = alpha;
     const Score original_beta = beta;
+    const bool null_window =
+      is_null_window(
+        original_alpha, original_beta);
+    const bool mate_score_window =
+      is_mate_score_window(
+        original_alpha, original_beta);
+    const bool reduction_context =
+      EnableLateMoveReductions
+      && depth >= LATE_MOVE_MIN_DEPTH
+      && null_window
+      && !mate_score_window;
+    const bool reduction_node_checked =
+      reduction_context && in_check(position);
 
     MoveList legal_moves;
     generate_legal_moves(position, legal_moves);
@@ -218,6 +321,7 @@ alpha_beta(
 
     Score best_score = -INFINITE_SCORE;
     Move best_move = Move::none();
+    std::size_t quiet_count = 0;
 
     // Strict score comparison preserves the first searched move among moves
     // that receive equal search scores.
@@ -227,6 +331,40 @@ alpha_beta(
         const Move move = legal_moves[move_index];
         const bool quiet =
           !is_tactical_move(position, move);
+        const std::size_t quiet_ordinal =
+          quiet_count;
+        if (quiet)
+            ++quiet_count;
+
+        PieceType moving_piece_type =
+          NO_PIECE_TYPE;
+        KillerPriority killer_priority = 0;
+        HistoryScore history_score = 0;
+        bool reduction_candidate =
+          reduction_context
+          && !reduction_node_checked
+          && move_index != 0
+          && quiet
+          && quiet_ordinal
+               >= LATE_MOVE_MIN_QUIET_ORDINAL
+          && move.type() == MoveType::NORMAL;
+        if (reduction_candidate) {
+            const Piece moving_piece =
+              position.piece_on(move.from());
+            moving_piece_type =
+              type_of(moving_piece);
+            reduction_candidate =
+              moving_piece_type >= KNIGHT
+              && moving_piece_type <= QUEEN;
+
+            if (reduction_candidate) {
+                killer_priority =
+                  state.killer_moves(ply).priority(move);
+                history_score =
+                  state.quiet_history.score(
+                    moving_piece, move.to());
+            }
+        }
         std::expected<NodeResult, SearchStopReason>
           child_result{NodeResult{}};
 
@@ -235,25 +373,72 @@ alpha_beta(
             // Every move advances to the opposing team, so the child score
             // and child window are negated for the parent perspective.
             if (move_index == 0) {
-                child_result = alpha_beta(
-                  position,
-                  history,
-                  depth - 1,
-                  ply + 1,
-                  -beta,
-                  -alpha,
-                  state);
+                child_result =
+                  alpha_beta<
+                    EnableLateMoveReductions>(
+                    position,
+                    history,
+                    depth - 1,
+                    ply + 1,
+                    -beta,
+                    -alpha,
+                    state);
             } else {
                 const Score scout_beta =
                   pvs_scout_beta(alpha);
-                child_result = alpha_beta(
-                  position,
-                  history,
-                  depth - 1,
-                  ply + 1,
-                  -scout_beta,
-                  -alpha,
-                  state);
+                const bool opposing_king_checked =
+                  reduction_candidate
+                  && killer_priority == 0
+                  && history_score <= 0
+                  && team_has_checked_king(
+                    position,
+                    team_of(
+                      position.side_to_move()));
+                const int reduction =
+                  reduction_candidate
+                    ? late_move_reduction(
+                        depth,
+                        quiet_ordinal,
+                        null_window,
+                        reduction_node_checked,
+                        quiet,
+                        move.type(),
+                        moving_piece_type,
+                        killer_priority,
+                        history_score,
+                        mate_score_window,
+                        opposing_king_checked)
+                    : 0;
+                assert(reduction >= 0);
+                assert(reduction <= depth - 1);
+
+                child_result =
+                  alpha_beta<
+                    EnableLateMoveReductions>(
+                    position,
+                    history,
+                    depth - 1 - reduction,
+                    ply + 1,
+                    -scout_beta,
+                    -alpha,
+                    state);
+
+                if (child_result
+                    && lmr_verification_required(
+                         reduction,
+                         -child_result->score,
+                         alpha)) {
+                    child_result =
+                      alpha_beta<
+                        EnableLateMoveReductions>(
+                        position,
+                        history,
+                        depth - 1,
+                        ply + 1,
+                        -scout_beta,
+                        -alpha,
+                        state);
+                }
 
                 if (child_result) {
                     const Score scout_score =
@@ -262,14 +447,16 @@ alpha_beta(
                           scout_score,
                           alpha,
                           beta)) {
-                        child_result = alpha_beta(
-                          position,
-                          history,
-                          depth - 1,
-                          ply + 1,
-                          -beta,
-                          -alpha,
-                          state);
+                        child_result =
+                          alpha_beta<
+                            EnableLateMoveReductions>(
+                            position,
+                            history,
+                            depth - 1,
+                            ply + 1,
+                            -beta,
+                            -alpha,
+                            state);
                     }
                 }
             }
@@ -397,12 +584,15 @@ alpha_beta(
 
 }  // namespace SearchDetail
 
-// Returns the fixed-depth negamax result. The first ordered move at each main
-// node uses the caller's complete window. Later moves use a null window and
-// re-search when they raise alpha without reaching beta. At the nominal
-// horizon, quiescence continues captures, promotions, and every legal check
-// evasion. Terminal positions end a line before evaluation. The position is
-// restored before return, and history is read-only.
+// Returns the nominal fixed-depth negamax result. The first ordered move at
+// each main node uses the caller's complete window. Later moves use a null
+// window and re-search when they raise alpha without reaching beta. Eligible
+// late quiet moves at null-window nodes first use a search reduced by one ply.
+// A reduced result that raises alpha is verified at full depth before it can
+// update the node. At the nominal horizon, quiescence continues captures,
+// promotions, and every legal check evasion. Terminal positions end a line
+// before evaluation. The position is restored before return, and history is
+// read-only.
 // Preconditions:
 // - depth is in the inclusive range 0..MAX_SEARCH_DEPTH;
 // - history.current_key() equals position.key();
@@ -439,6 +629,11 @@ alpha_beta(
 }
 
 static_assert(!SearchResult{}.has_move());
+static_assert(
+  SearchDetail::LATE_MOVE_REDUCTION > 0);
+static_assert(
+  SearchDetail::LATE_MOVE_MIN_DEPTH
+  > SearchDetail::LATE_MOVE_REDUCTION);
 static_assert(
   SearchDetail::TABLE_MATE_THRESHOLD
   > MAX_MATERIAL_SCORE);

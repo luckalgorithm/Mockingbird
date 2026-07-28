@@ -231,6 +231,22 @@ pvs_research_position() noexcept {
 }
 
 [[nodiscard]] constexpr Position
+team_check_position() noexcept {
+    Position position = kings_only_position();
+    position.put_piece(
+      R_ROOK, make_square(FILE_D, RANK_5));
+    return position;
+}
+
+[[nodiscard]] constexpr Position
+teammate_check_position() noexcept {
+    Position position = kings_only_position();
+    position.put_piece(
+      R_ROOK, make_square(FILE_K, RANK_5));
+    return position;
+}
+
+[[nodiscard]] constexpr Position
 king_capture_position() noexcept {
     Position position;
     position.put_piece(
@@ -487,6 +503,300 @@ static_assert(
   SearchDetail::pvs_scout_beta(
     INFINITE_SCORE - 1)
   == INFINITE_SCORE);
+static_assert(
+  SearchDetail::is_null_window(
+    Score{0}, Score{1}));
+static_assert(
+  !SearchDetail::is_null_window(
+    Score{0}, Score{2}));
+static_assert(
+  !SearchDetail::is_mate_score_window(
+    -SearchDetail::TABLE_MATE_THRESHOLD
+      + Score{1},
+    SearchDetail::TABLE_MATE_THRESHOLD
+      - Score{1}));
+static_assert(
+  SearchDetail::is_mate_score_window(
+    -SearchDetail::TABLE_MATE_THRESHOLD,
+    Score{0}));
+static_assert(
+  SearchDetail::is_mate_score_window(
+    Score{0},
+    SearchDetail::TABLE_MATE_THRESHOLD));
+static_assert(
+  SearchDetail::late_move_reduction(
+    SearchDetail::LATE_MOVE_MIN_DEPTH,
+    SearchDetail::LATE_MOVE_MIN_QUIET_ORDINAL,
+    true,
+    false,
+    true,
+    MoveType::NORMAL,
+    BISHOP,
+    KillerPriority{0},
+    HistoryScore{0},
+    false,
+    false)
+  == SearchDetail::LATE_MOVE_REDUCTION);
+static_assert(
+  SearchDetail::late_move_reduction(
+    SearchDetail::LATE_MOVE_MIN_DEPTH,
+    SearchDetail::LATE_MOVE_MIN_QUIET_ORDINAL,
+    true,
+    false,
+    true,
+    MoveType::NORMAL,
+    PAWN,
+    KillerPriority{0},
+    HistoryScore{0},
+    false,
+    false)
+  == 0);
+static_assert(
+  SearchDetail::late_move_reduction(
+    SearchDetail::LATE_MOVE_MIN_DEPTH,
+    SearchDetail::LATE_MOVE_MIN_QUIET_ORDINAL,
+    true,
+    false,
+    true,
+    MoveType::NORMAL,
+    KING,
+    KillerPriority{0},
+    HistoryScore{0},
+    false,
+    false)
+  == 0);
+static_assert(
+  SearchDetail::late_move_reduction(
+    SearchDetail::LATE_MOVE_MIN_DEPTH,
+    SearchDetail::LATE_MOVE_MIN_QUIET_ORDINAL,
+    true,
+    false,
+    true,
+    MoveType::NORMAL,
+    BISHOP,
+    KillerPriority{0},
+    HistoryScore{-1},
+    false,
+    false)
+  == SearchDetail::LATE_MOVE_REDUCTION);
+static_assert(
+  SearchDetail::late_move_reduction(
+    SearchDetail::LATE_MOVE_MIN_DEPTH - 1,
+    SearchDetail::LATE_MOVE_MIN_QUIET_ORDINAL,
+    true,
+    false,
+    true,
+    MoveType::NORMAL,
+    BISHOP,
+    KillerPriority{0},
+    HistoryScore{0},
+    false,
+    false)
+  == 0);
+static_assert(
+  SearchDetail::late_move_reduction(
+    SearchDetail::LATE_MOVE_MIN_DEPTH,
+    SearchDetail::LATE_MOVE_MIN_QUIET_ORDINAL - 1,
+    true,
+    false,
+    true,
+    MoveType::NORMAL,
+    BISHOP,
+    KillerPriority{0},
+    HistoryScore{0},
+    false,
+    false)
+  == 0);
+static_assert(
+  SearchDetail::late_move_reduction(
+    SearchDetail::LATE_MOVE_MIN_DEPTH,
+    SearchDetail::LATE_MOVE_MIN_QUIET_ORDINAL,
+    false,
+    false,
+    true,
+    MoveType::NORMAL,
+    BISHOP,
+    KillerPriority{0},
+    HistoryScore{0},
+    false,
+    false)
+  == 0);
+static_assert(
+  SearchDetail::late_move_reduction(
+    SearchDetail::LATE_MOVE_MIN_DEPTH,
+    SearchDetail::LATE_MOVE_MIN_QUIET_ORDINAL,
+    true,
+    true,
+    true,
+    MoveType::NORMAL,
+    BISHOP,
+    KillerPriority{0},
+    HistoryScore{0},
+    false,
+    false)
+  == 0);
+static_assert(
+  SearchDetail::late_move_reduction(
+    SearchDetail::LATE_MOVE_MIN_DEPTH,
+    SearchDetail::LATE_MOVE_MIN_QUIET_ORDINAL,
+    true,
+    false,
+    false,
+    MoveType::NORMAL,
+    BISHOP,
+    KillerPriority{0},
+    HistoryScore{0},
+    false,
+    false)
+  == 0);
+static_assert(
+  SearchDetail::late_move_reduction(
+    SearchDetail::LATE_MOVE_MIN_DEPTH,
+    SearchDetail::LATE_MOVE_MIN_QUIET_ORDINAL,
+    true,
+    false,
+    true,
+    MoveType::PROMOTION,
+    PAWN,
+    KillerPriority{0},
+    HistoryScore{0},
+    false,
+    false)
+  == 0);
+static_assert(
+  SearchDetail::late_move_reduction(
+    SearchDetail::LATE_MOVE_MIN_DEPTH,
+    SearchDetail::LATE_MOVE_MIN_QUIET_ORDINAL,
+    true,
+    false,
+    true,
+    MoveType::CASTLING,
+    KING,
+    KillerPriority{0},
+    HistoryScore{0},
+    false,
+    false)
+  == 0);
+static_assert(
+  SearchDetail::late_move_reduction(
+    SearchDetail::LATE_MOVE_MIN_DEPTH,
+    SearchDetail::LATE_MOVE_MIN_QUIET_ORDINAL,
+    true,
+    false,
+    true,
+    MoveType::EN_PASSANT,
+    PAWN,
+    KillerPriority{0},
+    HistoryScore{0},
+    false,
+    false)
+  == 0);
+static_assert(
+  SearchDetail::late_move_reduction(
+    SearchDetail::LATE_MOVE_MIN_DEPTH,
+    SearchDetail::LATE_MOVE_MIN_QUIET_ORDINAL,
+    true,
+    false,
+    true,
+    MoveType::NORMAL,
+    BISHOP,
+    KillerMoves::PRIMARY_PRIORITY,
+    HistoryScore{0},
+    false,
+    false)
+  == 0);
+static_assert(
+  SearchDetail::late_move_reduction(
+    SearchDetail::LATE_MOVE_MIN_DEPTH,
+    SearchDetail::LATE_MOVE_MIN_QUIET_ORDINAL,
+    true,
+    false,
+    true,
+    MoveType::NORMAL,
+    BISHOP,
+    KillerMoves::SECONDARY_PRIORITY,
+    HistoryScore{0},
+    false,
+    false)
+  == 0);
+static_assert(
+  SearchDetail::late_move_reduction(
+    SearchDetail::LATE_MOVE_MIN_DEPTH,
+    SearchDetail::LATE_MOVE_MIN_QUIET_ORDINAL,
+    true,
+    false,
+    true,
+    MoveType::NORMAL,
+    BISHOP,
+    KillerPriority{0},
+    HistoryScore{1},
+    false,
+    false)
+  == 0);
+static_assert(
+  SearchDetail::late_move_reduction(
+    SearchDetail::LATE_MOVE_MIN_DEPTH,
+    SearchDetail::LATE_MOVE_MIN_QUIET_ORDINAL,
+    true,
+    false,
+    true,
+    MoveType::NORMAL,
+    BISHOP,
+    KillerPriority{0},
+    HistoryScore{0},
+    true,
+    false)
+  == 0);
+static_assert(
+  SearchDetail::late_move_reduction(
+    SearchDetail::LATE_MOVE_MIN_DEPTH,
+    SearchDetail::LATE_MOVE_MIN_QUIET_ORDINAL,
+    true,
+    false,
+    true,
+    MoveType::NORMAL,
+    BISHOP,
+    KillerPriority{0},
+    HistoryScore{0},
+    false,
+    true)
+  == 0);
+static_assert(
+  !SearchDetail::lmr_verification_required(
+    SearchDetail::LATE_MOVE_REDUCTION,
+    Score{0},
+    Score{0}));
+static_assert(
+  SearchDetail::lmr_verification_required(
+    SearchDetail::LATE_MOVE_REDUCTION,
+    Score{1},
+    Score{0}));
+static_assert(
+  SearchDetail::lmr_verification_required(
+    SearchDetail::LATE_MOVE_REDUCTION,
+    Score{2},
+    Score{0}));
+static_assert(
+  !SearchDetail::lmr_verification_required(
+    0,
+    Score{1},
+    Score{0}));
+static_assert(
+  !SearchDetail::team_has_checked_king(
+    kings_only_position(),
+    BLUE_GREEN));
+static_assert(
+  SearchDetail::team_has_checked_king(
+    team_check_position(),
+    BLUE_GREEN));
+static_assert(
+  SearchDetail::team_has_checked_king(
+    teammate_check_position(),
+    BLUE_GREEN));
+static_assert(
+  !SearchDetail::team_has_checked_king(
+    team_check_position(),
+    RED_YELLOW));
 static_assert(
   !SearchDetail::pvs_research_required(
     Score{0}, Score{0}, Score{2}));
@@ -1047,6 +1357,241 @@ void test_required_pvs_research() {
       "PVS scouts, re-searches, and cancellation restore all root state");
 }
 
+void test_late_move_reduction_verification() {
+    Position position = pvs_research_position();
+    const Position original = position;
+    const std::array keys = {position.key()};
+    PositionHistory history = make_history(keys);
+    const Move reduced_move = Move::normal(
+      make_square(FILE_N, RANK_4),
+      make_square(FILE_I, RANK_9));
+    const Move expected = Move::normal(
+      make_square(FILE_N, RANK_4),
+      make_square(FILE_G, RANK_11));
+
+    SearchDetail::SearchState ordering_state;
+    MoveList ordered_moves;
+    generate_legal_moves(position, ordered_moves);
+    order_moves(
+      position,
+      ordered_moves,
+      ordering_state.ordering_buffer,
+      ordering_state.quiet_history,
+      ordering_state.killer_moves(0),
+      Move::none());
+
+    std::size_t quiet_ordinal = 0;
+    bool found_reduced_move = false;
+    for (const Move move : ordered_moves) {
+        if (is_tactical_move(position, move))
+            continue;
+
+        if (move == reduced_move) {
+            found_reduced_move = true;
+            break;
+        }
+        ++quiet_ordinal;
+    }
+
+    Position reduced_child = position;
+    UndoState unused;
+    do_move(
+      reduced_child, reduced_move, unused);
+    PositionHistory reduced_history{history};
+    reduced_history.push(reduced_child.key());
+    const bool gives_team_check =
+      SearchDetail::team_has_checked_king(
+        reduced_child,
+        team_of(reduced_child.side_to_move()));
+
+    expect(
+      found_reduced_move
+        && quiet_ordinal
+             == SearchDetail::
+                  LATE_MOVE_MIN_QUIET_ORDINAL
+        && !in_check(position)
+        && !gives_team_check
+        && SearchDetail::late_move_reduction(
+             SearchDetail::LATE_MOVE_MIN_DEPTH,
+             quiet_ordinal,
+             true,
+             false,
+             true,
+             reduced_move.type(),
+             BISHOP,
+             KillerPriority{0},
+             HistoryScore{0},
+             false,
+             gives_team_check)
+             == SearchDetail::LATE_MOVE_REDUCTION,
+      "the integration move satisfies every reduction condition");
+    if (!found_reduced_move)
+        return;
+
+    MoveList child_moves;
+    generate_legal_moves(
+      reduced_child, child_moves);
+    expect(
+      !child_moves.empty(),
+      "the reduced child has a legal table move");
+    if (child_moves.empty())
+        return;
+
+    constexpr Score alpha = 0;
+    constexpr Score beta = 1;
+    constexpr Score optimistic_child_score = -100;
+    constexpr int reduced_child_depth =
+      SearchDetail::LATE_MOVE_MIN_DEPTH
+      - 1
+      - SearchDetail::LATE_MOVE_REDUCTION;
+    constexpr int nominal_child_depth =
+      SearchDetail::LATE_MOVE_MIN_DEPTH - 1;
+    const PositionKey child_key =
+      reduced_child.key();
+    const HistoryContext child_context =
+      reduced_history.context();
+    const Move child_table_move =
+      child_moves[0];
+
+    const auto seed_optimistic_child =
+      [&](TranspositionTable& table) {
+          table.new_search();
+          table.store(
+            child_key,
+            child_context,
+            reduced_child_depth,
+            SearchDetail::score_to_table(
+              optimistic_child_score, 1),
+            TranspositionBound::EXACT,
+            child_table_move);
+      };
+
+    TranspositionTable reduced_table;
+    seed_optimistic_child(reduced_table);
+    SearchDetail::SearchState reduced_state{
+      SearchDetail::UnlimitedBudget{},
+      &reduced_table};
+    PositionHistory reduced_search_history{
+      history};
+    const auto reduced_result =
+      SearchDetail::alpha_beta(
+        position,
+        reduced_search_history,
+        SearchDetail::LATE_MOVE_MIN_DEPTH,
+        0,
+        alpha,
+        beta,
+        reduced_state);
+
+    TranspositionTable reference_table;
+    seed_optimistic_child(reference_table);
+    SearchDetail::SearchState reference_state{
+      SearchDetail::UnlimitedBudget{},
+      &reference_table};
+    PositionHistory reference_history{history};
+    const auto reference_result =
+      SearchDetail::alpha_beta<false>(
+        position,
+        reference_history,
+        SearchDetail::LATE_MOVE_MIN_DEPTH,
+        0,
+        alpha,
+        beta,
+        reference_state);
+
+    const TranspositionEntry* verified_child =
+      reduced_table.find(
+        child_key, child_context);
+    const TranspositionEntry* root_entry =
+      reduced_table.find(
+        position.key(), history.context());
+    expect(
+      reduced_result
+        && reference_result
+        && reduced_result->score
+             == reference_result->score
+        && reduced_result->best_move
+             == reference_result->best_move
+        && reduced_result->best_move == expected
+        && reduced_result->score == Score{230},
+      "full-depth verification corrects the optimistic reduced result");
+    expect(
+      reduced_state.nodes
+          == reference_state.nodes + 1
+        && verified_child
+        && verified_child->depth
+             == nominal_child_depth
+        && root_entry
+        && root_entry->depth
+             == SearchDetail::LATE_MOVE_MIN_DEPTH
+        && root_entry->bound
+             == TranspositionBound::LOWER,
+      "the reduced probe is followed by one nominal-depth verification");
+    expect(
+      positions_equal(position, original)
+        && history_matches(history, keys)
+        && reduced_search_history.current_key()
+             == position.key()
+        && reference_history.current_key()
+             == position.key(),
+      "reduced and unreduced searches restore position and history");
+    if (!reduced_result)
+        return;
+
+    bool saw_completed_verification = false;
+    for (std::uint64_t limit = 0;
+         limit < reduced_state.nodes;
+         ++limit) {
+        TranspositionTable table;
+        seed_optimistic_child(table);
+        SearchDetail::SearchBudget budget{
+          limit, std::nullopt};
+        SearchDetail::LimitedSearchState state{
+          std::move(budget),
+          &table};
+        Position working = position;
+        PositionHistory working_history{history};
+        const auto interrupted =
+          SearchDetail::alpha_beta(
+            working,
+            working_history,
+            SearchDetail::LATE_MOVE_MIN_DEPTH,
+            0,
+            alpha,
+            beta,
+            state);
+
+        const TranspositionEntry* child_entry =
+          table.find(
+            child_key, child_context);
+        if (child_entry
+            && child_entry->depth
+                 == nominal_child_depth) {
+            saw_completed_verification = true;
+        }
+
+        expect(
+          !interrupted
+            && interrupted.error()
+                 == SearchStopReason::NODE_LIMIT
+            && state.nodes == limit
+            && !table.find(
+                 position.key(),
+                 history.context()),
+          "every incomplete reduced-search prefix is discarded");
+        expect(
+          positions_equal(working, original)
+            && working_history.current_key()
+                 == position.key()
+            && history_matches(history, keys),
+          "every reduced-search interruption restores root state");
+    }
+
+    expect(
+      saw_completed_verification,
+      "an interrupted root can contain a completed child verification");
+}
+
 void test_pvs_research_and_cancellation() {
     Position position = material_tactic_position();
     const Position original = position;
@@ -1309,6 +1854,7 @@ int main() {
     test_root_and_child_repetition();
     test_special_move_state_restoration();
     test_required_pvs_research();
+    test_late_move_reduction_verification();
     test_pvs_research_and_cancellation();
     test_alpha_beta_matches_exhaustive_search();
     test_invalid_inputs_return_without_searching_in_release();
