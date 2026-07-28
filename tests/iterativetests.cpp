@@ -995,9 +995,9 @@ void test_previous_result_and_table_ordering() {
         depth_limits(3));
 
     expect(
-      fixed_one.nodes == 52
-        && fixed_two.nodes == 265
-        && depth_two.total_nodes == 155
+      fixed_one.nodes == 49
+        && fixed_two.nodes == 219
+        && depth_two.total_nodes == 152
         && depth_two.last_completed
         && depth_two.last_completed->attempts == 1
         && depth_two.last_completed->result.nodes
@@ -1009,11 +1009,11 @@ void test_previous_result_and_table_ordering() {
       "history-and-killer-assisted search has the expected "
       "depth-two result and node shape");
     expect(
-      fixed_three.nodes == 1164
-        && depth_three.total_nodes == 1172
+      fixed_three.nodes == 1146
+        && depth_three.total_nodes == 1188
         && depth_three.last_completed
         && depth_three.last_completed->result.nodes
-             == 1017
+             == 1036
         && depth_three.last_completed->result.score
              == fixed_three.score
         && depth_three.last_completed->result.best_move

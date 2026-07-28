@@ -6,7 +6,7 @@
 #include <cstdint>
 #include <limits>
 
-#include "evaluate.h"
+#include "exchange.h"
 #include "movelist.h"
 
 namespace Mockingbird {
@@ -597,8 +597,12 @@ constexpr void prioritize_killers(
   MoveList& moves,
   MoveOrderingBuffer& buffer,
   std::size_t begin,
+  std::size_t end,
   const KillerMoves& killers) noexcept {
-    if (begin >= moves.size())
+    assert(begin <= end);
+    assert(end <= moves.size());
+
+    if (begin >= end)
         return;
 
     const Move primary = killers.primary();
@@ -608,7 +612,7 @@ constexpr void prioritize_killers(
     std::size_t other_count = 0;
 
     for (std::size_t index = begin;
-         index < moves.size();
+         index < end;
          ++index) {
         const Move move = moves[index];
         if (!found_primary && move == primary) {
@@ -637,7 +641,61 @@ constexpr void prioritize_killers(
          ++index)
         moves[output++] = buffer[index];
 
+    assert(output == end);
+}
+
+struct MoveBands {
+    std::size_t quiet_begin = 0;
+    std::size_t quiet_end = 0;
+};
+
+// Moves non-losing tactical entries before quiet entries and losing tactical
+// entries after them. Relative order within all three ranges is preserved.
+// The input has already been sorted with every tactical entry before every
+// quiet entry.
+[[nodiscard]] constexpr MoveBands partition_exchange_bands(
+  const Position& position,
+  MoveList& moves,
+  MoveOrderingBuffer& buffer) noexcept {
+    std::size_t tactical_end = 0;
+    while (tactical_end < moves.size()
+           && is_tactical_move(
+                position, moves[tactical_end])) {
+        ++tactical_end;
+    }
+
+    std::size_t non_losing_count = 0;
+    std::size_t losing_count = 0;
+    for (std::size_t index = 0;
+         index < tactical_end;
+        ++index) {
+        const Move move = moves[index];
+        if (static_exchange_is_not_proven_losing(
+              position, move)) {
+            moves[non_losing_count++] = move;
+        } else {
+            buffer[losing_count++] = move;
+        }
+    }
+
+    const std::size_t quiet_begin =
+      non_losing_count;
+    std::size_t output = quiet_begin;
+    for (std::size_t index = tactical_end;
+         index < moves.size();
+         ++index) {
+        moves[output++] = moves[index];
+    }
+    const std::size_t quiet_end = output;
+
+    for (std::size_t index = 0;
+         index < losing_count;
+         ++index) {
+        moves[output++] = buffer[index];
+    }
+
     assert(output == moves.size());
+    return {quiet_begin, quiet_end};
 }
 
 constexpr void order_moves_impl(
@@ -647,6 +705,11 @@ constexpr void order_moves_impl(
   const QuietHistory* history,
   const KillerMoves* killers,
   Move preferred = Move::none()) noexcept {
+    MoveBands bands{
+      0,
+      moves.size(),
+    };
+
     if (moves.size() >= 2) {
         bool source_is_move_list = true;
         std::size_t width = 1;
@@ -674,23 +737,19 @@ constexpr void order_moves_impl(
                  ++index)
                 moves[index] = buffer[index];
         }
+
+        bands = partition_exchange_bands(
+          position, moves, buffer);
     }
 
     if (killers
         && (killers->primary().is_board_move()
             || killers->secondary().is_board_move())) {
-        std::size_t first_quiet = 0;
-        while (first_quiet < moves.size()
-               && is_tactical_move(
-                    position,
-                    moves[first_quiet])) {
-            ++first_quiet;
-        }
-
         prioritize_killers(
           moves,
           buffer,
-          first_quiet,
+          bands.quiet_begin,
+          bands.quiet_end,
           *killers);
     }
 
@@ -699,13 +758,15 @@ constexpr void order_moves_impl(
 
 }  // namespace OrderingDetail
 
-// Orders tactical moves by descending material score, followed by primary
-// and secondary killer moves, then other quiet moves by descending history
-// score. Equal scores retain their existing order. A preferred move contained
-// in the list is placed first after sorting. The position is unchanged and no
-// dynamic allocation is performed.
+// Orders non-losing tactical moves by descending material score, followed by
+// primary and secondary killer moves, then other quiet moves by descending
+// history score, and finally losing tactical moves. Equal scores retain their
+// existing order. A preferred move contained in the list is placed first
+// after sorting. The position is unchanged and no dynamic allocation is
+// performed.
 // Preconditions:
-// - every entry in moves was generated for position;
+// - every entry in moves is legal and was generated for position;
+// - position contains exactly one king of each color;
 // - buffer is not in use by another order_moves() call.
 constexpr void order_moves(
   const Position& position,
@@ -723,7 +784,8 @@ constexpr void order_moves(
       preferred);
 }
 
-// This overload applies quiet history without killer moves.
+// This overload applies quiet history without killer moves. Its position and
+// move-list preconditions are identical to the overload above.
 constexpr void order_moves(
   const Position& position,
   MoveList& moves,
@@ -739,7 +801,8 @@ constexpr void order_moves(
       preferred);
 }
 
-// This overload preserves stable generation order among quiet moves.
+// This overload preserves stable generation order among quiet moves. Its
+// position and move-list preconditions are identical to the overload above.
 constexpr void order_moves(
   const Position& position,
   MoveList& moves,
@@ -754,7 +817,8 @@ constexpr void order_moves(
       preferred);
 }
 
-// This overload owns its temporary merge-sort buffer.
+// This overload owns its temporary merge-sort buffer. Its position and
+// move-list preconditions are identical to the overload above.
 constexpr void order_moves(
   const Position& position,
   MoveList& moves,
@@ -771,7 +835,8 @@ constexpr void order_moves(
       preferred);
 }
 
-// This overload owns its temporary merge-sort buffer.
+// This overload owns its temporary merge-sort buffer. Its position and
+// move-list preconditions are identical to the overload above.
 constexpr void order_moves(
   const Position& position,
   MoveList& moves,
@@ -786,7 +851,8 @@ constexpr void order_moves(
       preferred);
 }
 
-// This overload owns its temporary merge-sort buffer.
+// This overload owns its temporary merge-sort buffer. Its position and
+// move-list preconditions are identical to the overload above.
 constexpr void order_moves(
   const Position& position,
   MoveList& moves,
