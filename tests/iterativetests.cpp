@@ -996,7 +996,7 @@ void test_previous_result_and_table_ordering() {
 
     expect(
       fixed_one.nodes == 52
-        && fixed_two.nodes == 347
+        && fixed_two.nodes == 265
         && depth_two.total_nodes == 155
         && depth_two.last_completed
         && depth_two.last_completed->attempts == 1
@@ -1006,19 +1006,19 @@ void test_previous_result_and_table_ordering() {
              == fixed_two.score
         && depth_two.last_completed->result.best_move
              == fixed_two.best_move,
-      "history-assisted search has the expected "
+      "history-and-killer-assisted search has the expected "
       "depth-two result and node shape");
     expect(
-      fixed_three.nodes == 970
-        && depth_three.total_nodes == 1145
+      fixed_three.nodes == 1164
+        && depth_three.total_nodes == 1172
         && depth_three.last_completed
         && depth_three.last_completed->result.nodes
-             == 990
+             == 1017
         && depth_three.last_completed->result.score
              == fixed_three.score
         && depth_three.last_completed->result.best_move
              == fixed_three.best_move,
-      "history-assisted search has the expected "
+      "history-and-killer-assisted search has the expected "
       "depth-three result and node shape");
 
     const std::uint64_t complete_limit =

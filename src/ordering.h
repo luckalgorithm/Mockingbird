@@ -344,6 +344,58 @@ class QuietHistory {
     ColorEntries entries_{};
 };
 
+using KillerPriority = std::uint8_t;
+
+// KillerMoves stores two quiet beta-cutoff moves for one main-search ply.
+// The primary slot contains the most recently recorded distinct move.
+class KillerMoves {
+  public:
+    static constexpr std::size_t SLOT_NB = 2;
+    static constexpr KillerPriority PRIMARY_PRIORITY = 2;
+    static constexpr KillerPriority SECONDARY_PRIORITY = 1;
+
+    constexpr KillerMoves() noexcept = default;
+
+    [[nodiscard]] constexpr Move primary() const noexcept {
+        return moves_[0];
+    }
+
+    [[nodiscard]] constexpr Move secondary() const noexcept {
+        return moves_[1];
+    }
+
+    [[nodiscard]] constexpr KillerPriority priority(
+      Move move) const noexcept {
+        if (!move.is_board_move())
+            return 0;
+        if (move == primary())
+            return PRIMARY_PRIORITY;
+        if (move == secondary())
+            return SECONDARY_PRIORITY;
+        return 0;
+    }
+
+    // Recording a new move shifts the previous primary move to the secondary
+    // slot. Recording the primary move leaves both slots unchanged.
+    // Precondition: move is a quiet beta-cutoff move.
+    constexpr void record(Move move) noexcept {
+        assert(is_ok(move));
+
+        if (move == primary())
+            return;
+
+        moves_[1] = moves_[0];
+        moves_[0] = move;
+    }
+
+    constexpr void clear() noexcept {
+        moves_ = {};
+    }
+
+  private:
+    std::array<Move, SLOT_NB> moves_{};
+};
+
 // MoveOrderingBuffer stores merge-sort output between passes. One buffer can
 // be reused after each completed order_moves() call.
 class MoveOrderingBuffer {
@@ -511,11 +563,89 @@ constexpr void merge_pass(
     }
 }
 
+// Moves one matching entry to begin and preserves the relative order of all
+// other entries. Searches beginning at begin cannot move an earlier entry.
+constexpr void promote_move(
+  MoveList& moves,
+  std::size_t begin,
+  Move promoted) noexcept {
+    if (!promoted.is_board_move()
+        || begin >= moves.size()) {
+        return;
+    }
+
+    std::size_t promoted_index = begin;
+    while (promoted_index < moves.size()
+           && moves[promoted_index] != promoted)
+        ++promoted_index;
+
+    if (promoted_index == moves.size())
+        return;
+
+    for (std::size_t index = promoted_index;
+         index > begin;
+         --index)
+        moves[index] = moves[index - 1];
+
+    moves[begin] = promoted;
+}
+
+// Places present killer moves at the front of the range and preserves the
+// relative order of every other move. Buffer stores the non-killer entries
+// while the range is rewritten.
+constexpr void prioritize_killers(
+  MoveList& moves,
+  MoveOrderingBuffer& buffer,
+  std::size_t begin,
+  const KillerMoves& killers) noexcept {
+    if (begin >= moves.size())
+        return;
+
+    const Move primary = killers.primary();
+    const Move secondary = killers.secondary();
+    bool found_primary = false;
+    bool found_secondary = false;
+    std::size_t other_count = 0;
+
+    for (std::size_t index = begin;
+         index < moves.size();
+         ++index) {
+        const Move move = moves[index];
+        if (!found_primary && move == primary) {
+            found_primary = true;
+            continue;
+        }
+        if (!found_secondary && move == secondary) {
+            found_secondary = true;
+            continue;
+        }
+
+        buffer[other_count++] = move;
+    }
+
+    if (!found_primary && !found_secondary)
+        return;
+
+    std::size_t output = begin;
+    if (found_primary)
+        moves[output++] = primary;
+    if (found_secondary)
+        moves[output++] = secondary;
+
+    for (std::size_t index = 0;
+         index < other_count;
+         ++index)
+        moves[output++] = buffer[index];
+
+    assert(output == moves.size());
+}
+
 constexpr void order_moves_impl(
   const Position& position,
   MoveList& moves,
   MoveOrderingBuffer& buffer,
   const QuietHistory* history,
+  const KillerMoves* killers,
   Move preferred = Move::none()) noexcept {
     if (moves.size() >= 2) {
         bool source_is_move_list = true;
@@ -546,34 +676,54 @@ constexpr void order_moves_impl(
         }
     }
 
-    if (!preferred.is_board_move())
-        return;
+    if (killers
+        && (killers->primary().is_board_move()
+            || killers->secondary().is_board_move())) {
+        std::size_t first_quiet = 0;
+        while (first_quiet < moves.size()
+               && is_tactical_move(
+                    position,
+                    moves[first_quiet])) {
+            ++first_quiet;
+        }
 
-    std::size_t preferred_index = 0;
-    while (preferred_index < moves.size()
-           && moves[preferred_index] != preferred)
-        ++preferred_index;
+        prioritize_killers(
+          moves,
+          buffer,
+          first_quiet,
+          *killers);
+    }
 
-    if (preferred_index == moves.size())
-        return;
-
-    for (std::size_t index = preferred_index;
-         index > 0;
-         --index)
-        moves[index] = moves[index - 1];
-
-    moves[0] = preferred;
+    promote_move(moves, 0, preferred);
 }
 
 }  // namespace OrderingDetail
 
-// Orders tactical moves by descending material score and quiet moves by
-// descending history score. Equal scores retain their existing order. A
-// preferred move contained in the list is placed first after sorting. The
-// position is unchanged and no dynamic allocation is performed.
+// Orders tactical moves by descending material score, followed by primary
+// and secondary killer moves, then other quiet moves by descending history
+// score. Equal scores retain their existing order. A preferred move contained
+// in the list is placed first after sorting. The position is unchanged and no
+// dynamic allocation is performed.
 // Preconditions:
 // - every entry in moves was generated for position;
 // - buffer is not in use by another order_moves() call.
+constexpr void order_moves(
+  const Position& position,
+  MoveList& moves,
+  MoveOrderingBuffer& buffer,
+  const QuietHistory& history,
+  const KillerMoves& killers,
+  Move preferred) noexcept {
+    OrderingDetail::order_moves_impl(
+      position,
+      moves,
+      buffer,
+      &history,
+      &killers,
+      preferred);
+}
+
+// This overload applies quiet history without killer moves.
 constexpr void order_moves(
   const Position& position,
   MoveList& moves,
@@ -585,6 +735,7 @@ constexpr void order_moves(
       moves,
       buffer,
       &history,
+      nullptr,
       preferred);
 }
 
@@ -599,6 +750,24 @@ constexpr void order_moves(
       moves,
       buffer,
       nullptr,
+      nullptr,
+      preferred);
+}
+
+// This overload owns its temporary merge-sort buffer.
+constexpr void order_moves(
+  const Position& position,
+  MoveList& moves,
+  const QuietHistory& history,
+  const KillerMoves& killers,
+  Move preferred) noexcept {
+    MoveOrderingBuffer buffer;
+    order_moves(
+      position,
+      moves,
+      buffer,
+      history,
+      killers,
       preferred);
 }
 
@@ -655,6 +824,15 @@ static_assert(
 static_assert(
   QuietHistory::depth_bonus(256)
   == QuietHistory::MAX_DEPTH_BONUS);
+static_assert(KillerMoves{}.primary().is_none());
+static_assert(KillerMoves{}.secondary().is_none());
+static_assert(KillerMoves::SLOT_NB == 2);
+static_assert(
+  KillerMoves::PRIMARY_PRIORITY
+  > KillerMoves::SECONDARY_PRIORITY);
+static_assert(KillerMoves::SECONDARY_PRIORITY > 0);
+static_assert(
+  KillerMoves{}.priority(Move::none()) == 0);
 static_assert(
   OrderingDetail::attacker_cost(PAWN)
   < OrderingDetail::attacker_cost(KNIGHT));

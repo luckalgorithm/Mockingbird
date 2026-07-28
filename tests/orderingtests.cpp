@@ -68,6 +68,19 @@ void expect(bool condition, std::string_view message) {
     return false;
 }
 
+[[nodiscard]] constexpr std::size_t move_index(
+  const MoveList& moves,
+  Move expected) noexcept {
+    for (std::size_t index = 0;
+         index < moves.size();
+         ++index) {
+        if (moves[index] == expected)
+            return index;
+    }
+
+    return moves.size();
+}
+
 [[nodiscard]] constexpr bool move_lists_equal(
   const MoveList& left,
   const MoveList& right) noexcept {
@@ -1378,6 +1391,374 @@ void test_quiet_history_ordering() {
       "quiet-history ordering preserves every position field");
 }
 
+void test_killer_move_pair() {
+    constexpr Move first = Move::normal(
+      make_square(FILE_H, RANK_5),
+      make_square(FILE_H, RANK_6));
+    constexpr Move second = Move::normal(
+      make_square(FILE_F, RANK_5),
+      make_square(FILE_F, RANK_6));
+    constexpr Move third = Move::normal(
+      make_square(FILE_F, RANK_5),
+      make_square(FILE_G, RANK_5));
+    constexpr Move alternate_encoding =
+      Move::castling(
+        first.from(), first.to());
+
+    KillerMoves killers;
+    expect(
+      killers.primary().is_none()
+        && killers.secondary().is_none()
+        && killers.priority(first) == 0
+        && killers.priority(Move::none()) == 0
+        && killers.priority(Move::null()) == 0,
+      "a killer pair starts empty with zero move priorities");
+
+    killers.record(first);
+    expect(
+      killers.primary() == first
+        && killers.secondary().is_none()
+        && killers.priority(first)
+             == KillerMoves::PRIMARY_PRIORITY
+        && killers.priority(
+             alternate_encoding) == 0,
+      "killer matching includes the complete encoded move type");
+
+    killers.record(first);
+    expect(
+      killers.primary() == first
+        && killers.secondary().is_none(),
+      "recording the primary killer is idempotent");
+
+    killers.record(second);
+    expect(
+      killers.primary() == second
+        && killers.secondary() == first
+        && killers.priority(second)
+             == KillerMoves::PRIMARY_PRIORITY
+        && killers.priority(first)
+             == KillerMoves::SECONDARY_PRIORITY,
+      "a distinct killer shifts the prior primary to the secondary slot");
+
+    killers.record(first);
+    expect(
+      killers.primary() == first
+        && killers.secondary() == second,
+      "recording the secondary killer promotes it and retains the old primary");
+
+    killers.record(third);
+    expect(
+      killers.primary() == third
+        && killers.secondary() == first
+        && killers.priority(second) == 0,
+      "a third distinct killer replaces the old secondary slot");
+
+    killers.clear();
+    expect(
+      killers.primary().is_none()
+        && killers.secondary().is_none()
+        && killers.priority(third) == 0,
+      "clearing a killer pair resets both slots");
+}
+
+void test_killer_move_ordering() {
+    Position position =
+      material_tactic_position();
+    const Position original = position;
+    const Move capture = Move::normal(
+      make_square(FILE_F, RANK_5),
+      make_square(FILE_F, RANK_8));
+
+    MoveList legal_moves;
+    generate_legal_moves(position, legal_moves);
+    std::array<Move, 4> quiets{};
+    std::size_t quiet_count = 0;
+    for (const Move move : legal_moves) {
+        if (is_tactical_move(position, move)
+            || quiet_count == quiets.size()) {
+            continue;
+        }
+
+        quiets[quiet_count++] = move;
+    }
+
+    expect(
+      contains_move(legal_moves, capture)
+        && quiet_count == quiets.size(),
+      "the killer-ordering fixture contains one capture and four quiet moves");
+    if (!contains_move(legal_moves, capture)
+        || quiet_count != quiets.size()) {
+        return;
+    }
+
+    QuietHistory history;
+    history.update(
+      position.piece_on(quiets[3].from()),
+      quiets[3].to(),
+      QuietHistory::LIMIT);
+    history.update(
+      position.piece_on(quiets[1].from()),
+      quiets[1].to(),
+      -QuietHistory::LIMIT);
+    history.update(
+      position.piece_on(quiets[2].from()),
+      quiets[2].to(),
+      -QuietHistory::LIMIT);
+
+    KillerMoves killers;
+    killers.record(quiets[2]);
+    killers.record(quiets[1]);
+
+    MoveList ordered;
+    ordered.push_back(quiets[0]);
+    ordered.push_back(quiets[2]);
+    ordered.push_back(quiets[3]);
+    ordered.push_back(capture);
+    ordered.push_back(quiets[1]);
+    MoveOrderingBuffer buffer;
+    order_moves(
+      position,
+      ordered,
+      buffer,
+      history,
+      killers,
+      Move::none());
+    expect(
+      ordered[0] == capture
+        && ordered[1] == quiets[1]
+        && ordered[2] == quiets[2]
+        && ordered[3] == quiets[3]
+        && ordered[4] == quiets[0],
+      "tactical, killer-slot, and quiet-history priorities form distinct bands");
+
+    MoveList preferred;
+    preferred.push_back(quiets[0]);
+    preferred.push_back(quiets[2]);
+    preferred.push_back(quiets[3]);
+    preferred.push_back(capture);
+    preferred.push_back(quiets[1]);
+    order_moves(
+      position,
+      preferred,
+      buffer,
+      history,
+      killers,
+      quiets[0]);
+    expect(
+      preferred[0] == quiets[0]
+        && preferred[1] == capture
+        && preferred[2] == quiets[1]
+        && preferred[3] == quiets[2]
+        && preferred[4] == quiets[3],
+      "a preferred quiet move precedes tactical and killer ordering");
+
+    const Move absent = Move::normal(
+      make_square(FILE_D, RANK_1),
+      make_square(FILE_D, RANK_2));
+    killers.record(absent);
+    MoveList absent_primary;
+    absent_primary.push_back(quiets[0]);
+    absent_primary.push_back(quiets[2]);
+    absent_primary.push_back(quiets[3]);
+    absent_primary.push_back(capture);
+    absent_primary.push_back(quiets[1]);
+    order_moves(
+      position,
+      absent_primary,
+      buffer,
+      history,
+      killers,
+      Move::none());
+    expect(
+      absent_primary[0] == capture
+        && absent_primary[1] == quiets[1]
+        && absent_primary[2] == quiets[3]
+        && absent_primary[3] == quiets[0]
+        && absent_primary[4] == quiets[2],
+      "an absent primary killer leaves a present secondary ahead of history");
+
+    Position quiet_position =
+      kings_only_position();
+    quiet_position.put_piece(
+      R_ROOK, make_square(FILE_G, RANK_5));
+    const Move stale_killer = Move::normal(
+      make_square(FILE_G, RANK_5),
+      make_square(FILE_G, RANK_8));
+    MoveList quiet_legal;
+    generate_legal_moves(
+      quiet_position, quiet_legal);
+
+    Position capture_position = quiet_position;
+    capture_position.put_piece(
+      B_PAWN, stale_killer.to());
+    capture_position.put_piece(
+      R_PAWN, make_square(FILE_H, RANK_7));
+    capture_position.put_piece(
+      B_QUEEN, make_square(FILE_I, RANK_8));
+    const Move queen_capture = Move::normal(
+      make_square(FILE_H, RANK_7),
+      make_square(FILE_I, RANK_8));
+    MoveList capture_legal;
+    generate_legal_moves(
+      capture_position, capture_legal);
+
+    expect(
+      contains_move(quiet_legal, stale_killer)
+        && !is_tactical_move(
+             quiet_position, stale_killer)
+        && contains_move(
+             capture_legal, stale_killer)
+        && contains_move(
+             capture_legal, queen_capture)
+        && is_tactical_move(
+             capture_position, stale_killer)
+        && move_order_score(
+             capture_position, queen_capture)
+             > move_order_score(
+                 capture_position,
+                 stale_killer),
+      "a previously quiet killer can be a lower-priority capture in another node");
+
+    if (contains_move(capture_legal, stale_killer)
+        && contains_move(
+             capture_legal, queen_capture)) {
+        KillerMoves stale;
+        stale.record(stale_killer);
+        QuietHistory empty_history;
+        MoveList captures;
+        captures.push_back(stale_killer);
+        captures.push_back(queen_capture);
+        order_moves(
+          capture_position,
+          captures,
+          buffer,
+          empty_history,
+          stale,
+          Move::none());
+        expect(
+          move_index(captures, queen_capture)
+            < move_index(captures, stale_killer),
+          "a stale killer that is now tactical retains material ordering");
+    }
+
+    PositionHistory search_history{
+      position.key()};
+    SearchDetail::SearchState tactical_state;
+    const auto tactical_cutoff =
+      SearchDetail::alpha_beta(
+        position,
+        search_history,
+        1,
+        0,
+        -INFINITE_SCORE,
+        DRAW_SCORE,
+        tactical_state);
+    expect(
+      tactical_cutoff
+        && tactical_cutoff->best_move == capture
+        && tactical_state.killer_moves(0)
+             .primary().is_none()
+        && tactical_state.killer_moves(0)
+             .secondary().is_none(),
+      "a tactical beta cutoff does not update either killer slot");
+    expect(
+      positions_equal(position, original)
+        && search_history.size() == 1
+        && search_history.current_key()
+             == position.key(),
+      "killer-ordering checks preserve position and history");
+}
+
+void test_killer_ply_isolation() {
+    Position position =
+      material_tactic_position();
+    const Move capture = Move::normal(
+      make_square(FILE_F, RANK_5),
+      make_square(FILE_F, RANK_8));
+    MoveList legal_moves;
+    generate_legal_moves(position, legal_moves);
+
+    std::array<Move, 4> quiets{};
+    std::size_t quiet_count = 0;
+    for (const Move move : legal_moves) {
+        if (!is_tactical_move(position, move)
+            && quiet_count < quiets.size()) {
+            quiets[quiet_count++] = move;
+        }
+    }
+
+    expect(
+      contains_move(legal_moves, capture)
+        && quiet_count == quiets.size(),
+      "the ply-isolation fixture contains every required move");
+    if (!contains_move(legal_moves, capture)
+        || quiet_count != quiets.size()) {
+        return;
+    }
+
+    SearchDetail::SearchState state;
+    state.killer_moves(4).record(quiets[1]);
+    state.killer_moves(5).record(quiets[2]);
+    state.killer_moves(
+      MAX_SEARCH_DEPTH - 1).record(quiets[3]);
+    state.quiet_history.update(
+      position.piece_on(quiets[0].from()),
+      quiets[0].to(),
+      QuietHistory::LIMIT);
+
+    MoveList ply_four;
+    ply_four.push_back(quiets[2]);
+    ply_four.push_back(quiets[0]);
+    ply_four.push_back(capture);
+    ply_four.push_back(quiets[1]);
+    order_moves(
+      position,
+      ply_four,
+      state.ordering_buffer,
+      state.quiet_history,
+      state.killer_moves(4),
+      Move::none());
+
+    MoveList ply_five;
+    ply_five.push_back(quiets[1]);
+    ply_five.push_back(quiets[0]);
+    ply_five.push_back(capture);
+    ply_five.push_back(quiets[2]);
+    order_moves(
+      position,
+      ply_five,
+      state.ordering_buffer,
+      state.quiet_history,
+      state.killer_moves(5),
+      Move::none());
+
+    expect(
+      ply_four[0] == capture
+        && ply_four[1] == quiets[1]
+        && ply_four[2] == quiets[0]
+        && ply_five[0] == capture
+        && ply_five[1] == quiets[2]
+        && ply_five[2] == quiets[0],
+      "killer moves affect only the main-search ply where they were recorded");
+    expect(
+      state.killer_moves(3).primary().is_none()
+        && state.killer_moves(4).primary()
+             == quiets[1]
+        && state.killer_moves(5).primary()
+             == quiets[2]
+        && state.killer_moves(
+             MAX_SEARCH_DEPTH - 1)
+             .primary() == quiets[3],
+      "untouched, adjacent, and final killer-table indexes are independent");
+
+    state.killer_moves(4).clear();
+    expect(
+      state.killer_moves(4).primary().is_none()
+        && state.killer_moves(5).primary()
+             == quiets[2],
+      "clearing one ply does not alter an adjacent killer pair");
+}
+
 void test_preferred_move_ordering() {
     Position position =
       material_tactic_position();
@@ -1550,6 +1931,13 @@ void test_aliased_quiet_cutoff_history() {
         == QuietHistory::depth_bonus(1),
       "an earlier aliased quiet does not penalize the cutoff history entry");
     expect(
+      state.killer_moves(0).primary()
+          == cutoff_alias
+        && state.killer_moves(0)
+             .secondary().is_none(),
+      "the exact aliased move, rather than its shared history entry, "
+      "occupies the primary killer slot");
+    expect(
       positions_equal(position, original)
         && history.size() == 1
         && history.current_key()
@@ -1635,6 +2023,13 @@ void test_quiet_history_cutoff_training() {
           "a later quiet move produces the expected null-window beta cutoff");
         if (!first)
             return;
+        expect(
+          state.killer_moves(0).primary()
+              == target
+            && state.killer_moves(0)
+                 .secondary().is_none(),
+          "a completed rotated quiet cutoff records its exact move as "
+          "the primary root killer");
 
         bool root_updates_match = true;
         for (std::size_t index = 0;
@@ -1671,6 +2066,20 @@ void test_quiet_history_cutoff_training() {
             && trained_order[0] == target,
           "the rewarded quiet cutoff leads the next root ordering");
 
+        QuietHistory empty_history;
+        MoveList killer_order = generated;
+        order_moves(
+          position,
+          killer_order,
+          state.ordering_buffer,
+          empty_history,
+          state.killer_moves(0),
+          Move::none());
+        expect(
+          !killer_order.empty()
+            && killer_order[0] == target,
+          "the recorded killer leads root quiet moves without history scores");
+
         const std::uint64_t first_nodes =
           state.nodes;
         const auto trained =
@@ -1697,6 +2106,12 @@ void test_quiet_history_cutoff_training() {
             target_piece, target.to())
             == HistoryScore{571},
           "a repeated quiet cutoff applies a second gravity reward");
+        expect(
+          state.killer_moves(0).primary()
+              == target
+            && state.killer_moves(0)
+                 .secondary().is_none(),
+          "repeating the primary killer leaves the root pair unchanged");
 
         const std::uint64_t interrupted_limit =
           FIRST_SEARCH_NODES[rotation_index]
@@ -1737,9 +2152,13 @@ void test_quiet_history_cutoff_training() {
                  == SearchStopReason::NODE_LIMIT
             && interrupted_state.nodes
                  == interrupted_limit
-            && interrupted_root_history_zero,
+            && interrupted_root_history_zero
+            && interrupted_state.killer_moves(0)
+                 .primary().is_none()
+            && interrupted_state.killer_moves(0)
+                 .secondary().is_none(),
           "an interrupted cutoff child cannot update root-player "
-          "quiet history");
+          "history or root killers");
 
         SearchDetail::SearchBudget exact_budget{
           FIRST_SEARCH_NODES[rotation_index],
@@ -1765,8 +2184,12 @@ void test_quiet_history_cutoff_training() {
                       rotation_index]
             && exact_state.quiet_history.score(
                  target_piece, target.to())
-                 == DEPTH_THREE_BONUS,
-          "the exact node boundary completes and trains the quiet cutoff");
+                 == DEPTH_THREE_BONUS
+            && exact_state.killer_moves(0)
+                 .primary() == target
+            && exact_state.killer_moves(0)
+                 .secondary().is_none(),
+          "the exact node boundary completes and trains both quiet heuristics");
         expect(
           positions_equal(position, original)
             && history.size() == 1
@@ -1784,6 +2207,128 @@ void test_quiet_history_cutoff_training() {
         position = rotate_clockwise(position);
         target = rotate_clockwise(target);
     }
+}
+
+void test_killer_training_after_pvs_research() {
+    Position position =
+      quiet_history_cutoff_position();
+    const Position original = position;
+    const Move target = Move::normal(
+      make_square(FILE_N, RANK_4),
+      make_square(FILE_G, RANK_11));
+    const Piece target_piece =
+      position.piece_on(target.from());
+    const PositionHistory history{
+      position.key()};
+
+    Position target_child = position;
+    UndoState target_undo;
+    do_move(
+      target_child, target, target_undo);
+    PositionHistory target_child_history{
+      history};
+    target_child_history.push(
+      target_child.key());
+
+    TranspositionTable interrupted_table;
+    interrupted_table.new_search();
+    SearchDetail::SearchBudget budget{
+      std::uint64_t{183},
+      std::nullopt};
+    SearchDetail::LimitedSearchState
+      interrupted_state{
+        std::move(budget),
+        &interrupted_table};
+    PositionHistory interrupted_history{
+      history};
+    const auto interrupted =
+      SearchDetail::alpha_beta(
+        position,
+        interrupted_history,
+        3,
+        0,
+        -INFINITE_SCORE,
+        Score{300},
+        interrupted_state);
+    const TranspositionEntry* scout_entry =
+      interrupted_table.find(
+        target_child.key(),
+        target_child_history.context());
+
+    expect(
+      !interrupted
+        && interrupted.error()
+             == SearchStopReason::NODE_LIMIT
+        && interrupted_state.nodes == 183
+        && scout_entry
+        && scout_entry->depth == 2
+        && scout_entry->bound
+             == TranspositionBound::UPPER
+        && scout_entry->score == Score{-230},
+      "the PVS scout completes before the finite-window re-search is interrupted");
+    expect(
+      interrupted_state.killer_moves(0)
+          .primary().is_none()
+        && interrupted_state.killer_moves(0)
+             .secondary().is_none()
+        && interrupted_state.quiet_history.score(
+             target_piece, target.to()) == 0
+        && !interrupted_table.find(
+             position.key(),
+             history.context()),
+      "an interior scout result cannot train or publish the interrupted root");
+
+    TranspositionTable completed_table;
+    completed_table.new_search();
+    SearchDetail::SearchState completed_state{
+      SearchDetail::UnlimitedBudget{},
+      &completed_table};
+    PositionHistory completed_history{
+      history};
+    const auto completed =
+      SearchDetail::alpha_beta(
+        position,
+        completed_history,
+        3,
+        0,
+        -INFINITE_SCORE,
+        Score{300},
+        completed_state);
+    const TranspositionEntry* root_entry =
+      completed_table.find(
+        position.key(),
+        history.context());
+
+    expect(
+      completed
+        && completed->score == BISHOP_VALUE
+        && completed->best_move == target
+        && completed_state.nodes == 268
+        && root_entry
+        && root_entry->depth == 3
+        && root_entry->bound
+             == TranspositionBound::LOWER
+        && root_entry->score == BISHOP_VALUE,
+      "the completed PVS re-search returns the exact fail-soft cutoff score");
+    expect(
+      completed_state.killer_moves(0)
+          .primary() == target
+        && completed_state.killer_moves(0)
+             .secondary().is_none()
+        && completed_state.quiet_history.score(
+             target_piece,
+             target.to())
+             == QuietHistory::depth_bonus(3),
+      "the quiet move is trained only after its full-window re-search completes");
+    expect(
+      positions_equal(position, original)
+        && interrupted_history.size() == 1
+        && interrupted_history.current_key()
+             == position.key()
+        && completed_history.size() == 1
+        && completed_history.current_key()
+             == position.key(),
+      "interrupted and completed PVS killer training restores all root state");
 }
 
 struct ReferenceResult {
@@ -2020,9 +2565,13 @@ int main() {
     test_en_passant_promotions();
     test_quiet_history_table();
     test_quiet_history_ordering();
+    test_killer_move_pair();
+    test_killer_move_ordering();
+    test_killer_ply_isolation();
     test_preferred_move_ordering();
     test_aliased_quiet_cutoff_history();
     test_quiet_history_cutoff_training();
+    test_killer_training_after_pvs_research();
     test_search_integration();
 
     if (failures != 0) {

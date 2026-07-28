@@ -1,6 +1,8 @@
 #pragma once
 
+#include <array>
 #include <cassert>
+#include <cstddef>
 #include <cstdint>
 #include <expected>
 #include <limits>
@@ -53,11 +55,37 @@ class BasicSearchState {
         return table_;
     }
 
+    // Main-search nodes with positive depth use ply values from zero through
+    // MAX_SEARCH_DEPTH - 1.
+    // Precondition: ply is in that inclusive range.
+    [[nodiscard]] constexpr KillerMoves& killer_moves(
+      int ply) noexcept {
+        assert(ply >= 0);
+        assert(ply < MAX_SEARCH_DEPTH);
+        return killer_moves_[
+          static_cast<std::size_t>(ply)];
+    }
+
+    // Main-search nodes with positive depth use ply values from zero through
+    // MAX_SEARCH_DEPTH - 1.
+    // Precondition: ply is in that inclusive range.
+    [[nodiscard]] constexpr const KillerMoves&
+    killer_moves(int ply) const noexcept {
+        assert(ply >= 0);
+        assert(ply < MAX_SEARCH_DEPTH);
+        return killer_moves_[
+          static_cast<std::size_t>(ply)];
+    }
+
     std::uint64_t nodes = 0;
     MoveOrderingBuffer ordering_buffer;
     QuietHistory quiet_history;
 
   private:
+    std::array<
+      KillerMoves,
+      static_cast<std::size_t>(MAX_SEARCH_DEPTH)>
+      killer_moves_{};
     Budget budget_;
     TranspositionTable* table_ = nullptr;
 };

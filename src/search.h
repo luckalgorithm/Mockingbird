@@ -213,6 +213,7 @@ alpha_beta(
       legal_moves,
       state.ordering_buffer,
       state.quiet_history,
+      state.killer_moves(ply),
       ordering_move);
 
     Score best_score = -INFINITE_SCORE;
@@ -294,6 +295,7 @@ alpha_beta(
                 const Piece cutoff_piece =
                   position.piece_on(
                     move.from());
+                state.killer_moves(ply).record(move);
                 state.quiet_history.reward(
                   cutoff_piece,
                   move.to(),
