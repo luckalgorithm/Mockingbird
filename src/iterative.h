@@ -29,6 +29,9 @@ enum class IterativeStop : std::uint8_t {
 struct CompletedIteration {
     SearchResult result;
     int depth = 0;
+    // Attempts includes the initial search and every aspiration re-search at
+    // this depth.
+    std::uint32_t attempts = 0;
 
     [[nodiscard]] friend constexpr bool operator==(
       const CompletedIteration&,
@@ -57,6 +60,108 @@ struct IterativeResult {
 };
 
 namespace IterationDetail {
+
+inline constexpr std::int64_t
+  INITIAL_ASPIRATION_HALF_WIDTH =
+    PAWN_VALUE / 2;
+inline constexpr std::int64_t
+  FULL_ASPIRATION_HALF_WIDTH =
+    std::int64_t{2} * INFINITE_SCORE;
+
+struct AspirationWindow {
+    Score alpha = -INFINITE_SCORE;
+    Score beta = INFINITE_SCORE;
+
+    [[nodiscard]] constexpr bool
+    is_full() const noexcept {
+        return alpha == -INFINITE_SCORE
+            && beta == INFINITE_SCORE;
+    }
+
+    // Alpha-beta scores equal to a boundary retain only an upper or lower
+    // bound. An exact score lies strictly between both boundaries.
+    [[nodiscard]] constexpr bool
+    contains_exact(Score score) const noexcept {
+        return score > alpha && score < beta;
+    }
+
+    [[nodiscard]] friend constexpr bool operator==(
+      const AspirationWindow&,
+      const AspirationWindow&) noexcept = default;
+};
+
+inline constexpr AspirationWindow FULL_ASPIRATION_WINDOW{};
+
+[[nodiscard]] constexpr AspirationWindow
+make_aspiration_window(
+  Score center,
+  std::int64_t half_width) noexcept {
+    assert(center > -INFINITE_SCORE);
+    assert(center < INFINITE_SCORE);
+    assert(half_width > 0);
+    assert(
+      half_width
+      <= FULL_ASPIRATION_HALF_WIDTH);
+
+    constexpr std::int64_t minimum =
+      -std::int64_t{INFINITE_SCORE};
+    constexpr std::int64_t maximum =
+      std::int64_t{INFINITE_SCORE};
+    const std::int64_t lower =
+      std::int64_t{center} - half_width;
+    const std::int64_t upper =
+      std::int64_t{center} + half_width;
+    const std::int64_t clamped_lower =
+      lower < minimum ? minimum : lower;
+    const std::int64_t clamped_upper =
+      upper > maximum ? maximum : upper;
+
+    const AspirationWindow window{
+      static_cast<Score>(clamped_lower),
+      static_cast<Score>(clamped_upper),
+    };
+    assert(window.alpha < window.beta);
+    return window;
+}
+
+// A completed failed search supplies a bound on the exact score. The next
+// half-width both doubles and extends at least one score unit beyond that
+// bound.
+[[nodiscard]] constexpr std::int64_t
+widen_aspiration_half_width(
+  Score center,
+  Score bound,
+  std::int64_t half_width) noexcept {
+    assert(center > -INFINITE_SCORE);
+    assert(center < INFINITE_SCORE);
+    assert(bound >= -INFINITE_SCORE);
+    assert(bound <= INFINITE_SCORE);
+    assert(half_width > 0);
+    assert(
+      half_width
+      < FULL_ASPIRATION_HALF_WIDTH);
+
+    const std::int64_t center_value = center;
+    const std::int64_t bound_value = bound;
+    const std::int64_t distance =
+      bound_value >= center_value
+        ? bound_value - center_value
+        : center_value - bound_value;
+    const std::int64_t required =
+      distance + 1;
+    const std::int64_t doubled =
+      half_width
+          >= FULL_ASPIRATION_HALF_WIDTH / 2
+        ? FULL_ASPIRATION_HALF_WIDTH
+        : half_width * 2;
+    const std::int64_t widened =
+      doubled > required ? doubled : required;
+
+    return widened
+             < FULL_ASPIRATION_HALF_WIDTH
+      ? widened
+      : FULL_ASPIRATION_HALF_WIDTH;
+}
 
 [[nodiscard]] constexpr bool valid_limits(
   const IterativeLimits& limits) noexcept {
@@ -87,7 +192,9 @@ iterative_stop(SearchStopReason reason) noexcept {
 // iteration. Node and time limits are cumulative across the complete call.
 // One transposition table is shared by every iteration. The previous
 // completed root move is ordered first in the next iteration when it remains
-// legal.
+// legal. After depth one, each iteration starts with an aspiration window
+// around the previous exact score. Failed searches widen that window and are
+// included in the iteration's node and attempt counts.
 // Time is checked when a node is entered, so one active node can finish after
 // the requested duration.
 //
@@ -152,57 +259,123 @@ iterative_stop(SearchStopReason reason) noexcept {
       &table};
     PositionHistory search_history{history};
     Move previous_best = Move::none();
+    Score previous_score = DRAW_SCORE;
 
     for (int depth = 1;
          depth <= limits.max_depth;
          ++depth) {
         const std::uint64_t iteration_start_nodes =
           state.nodes;
-        const auto iteration =
-          SearchDetail::alpha_beta(
-            position,
-            search_history,
-            depth,
-            0,
-            -INFINITE_SCORE,
-            INFINITE_SCORE,
-            state,
-            previous_best);
+        std::int64_t half_width =
+          depth == 1
+            ? IterationDetail::FULL_ASPIRATION_HALF_WIDTH
+            : IterationDetail::INITIAL_ASPIRATION_HALF_WIDTH;
+        IterationDetail::AspirationWindow window =
+          depth == 1
+            ? IterationDetail::FULL_ASPIRATION_WINDOW
+            : IterationDetail::make_aspiration_window(
+                  previous_score,
+                  half_width);
+        Move attempt_preferred = previous_best;
+        SearchDetail::NodeResult completed;
+        std::uint32_t attempts = 0;
 
-        assert(
-          search_history.current_key()
-          == position.key());
+        while (true) {
+            ++attempts;
+            const auto iteration =
+              SearchDetail::alpha_beta(
+                position,
+                search_history,
+                depth,
+                0,
+                window.alpha,
+                window.beta,
+                state,
+                attempt_preferred);
 
-        if (!iteration) {
-            result.total_nodes = state.nodes;
-            return finish(
-              IterationDetail::iterative_stop(
-                iteration.error()));
+            assert(
+              search_history.current_key()
+              == position.key());
+
+            if (!iteration) {
+                result.total_nodes = state.nodes;
+                return finish(
+                  IterationDetail::iterative_stop(
+                    iteration.error()));
+            }
+
+            if (!iteration->best_move.is_board_move()
+                || window.is_full()
+                || window.contains_exact(
+                     iteration->score)) {
+                completed = *iteration;
+                break;
+            }
+
+            attempt_preferred =
+              iteration->best_move;
+
+            half_width =
+              IterationDetail::widen_aspiration_half_width(
+                  previous_score,
+                  iteration->score,
+                  half_width);
+            window =
+              IterationDetail::make_aspiration_window(
+                  previous_score,
+                  half_width);
         }
 
+        assert(attempts > 0);
+        assert(completed.score > -INFINITE_SCORE);
+        assert(completed.score < INFINITE_SCORE);
         result.last_completed =
           CompletedIteration{
             SearchResult{
-              iteration->best_move,
-              iteration->score,
+              completed.best_move,
+              completed.score,
               state.nodes
                 - iteration_start_nodes,
             },
             depth,
+            attempts,
           };
         result.total_nodes = state.nodes;
 
-        if (!iteration->best_move.is_board_move()) {
+        if (!completed.best_move.is_board_move()) {
             return finish(
               IterativeStop::TERMINAL_POSITION);
         }
 
-        previous_best = iteration->best_move;
+        previous_best = completed.best_move;
+        previous_score = completed.score;
     }
 
     return finish(IterativeStop::DEPTH_LIMIT);
 }
 
+static_assert(
+  IterationDetail::INITIAL_ASPIRATION_HALF_WIDTH
+  > 0);
+static_assert(
+  IterationDetail::make_aspiration_window(
+    DRAW_SCORE,
+    IterationDetail::INITIAL_ASPIRATION_HALF_WIDTH)
+  == IterationDetail::AspirationWindow{
+       -PAWN_VALUE / 2,
+       PAWN_VALUE / 2,
+     });
+static_assert(
+  IterationDetail::make_aspiration_window(
+    MATE_SCORE,
+    IterationDetail::FULL_ASPIRATION_HALF_WIDTH)
+    .is_full());
+static_assert(
+  IterationDetail::widen_aspiration_half_width(
+    DRAW_SCORE,
+    PAWN_VALUE / 2,
+    IterationDetail::INITIAL_ASPIRATION_HALF_WIDTH)
+  == PAWN_VALUE);
 static_assert(
   IterationDetail::valid_limits(
     IterativeLimits{}));

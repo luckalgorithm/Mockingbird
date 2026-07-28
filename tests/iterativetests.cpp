@@ -263,6 +263,36 @@ teammate_recapture_position() noexcept {
 }
 
 [[nodiscard]] constexpr Position
+repeated_fail_low_position() noexcept {
+    Position position = kings_only_position();
+    position.put_piece(
+      G_ROOK, make_square(FILE_E, RANK_8));
+    position.put_piece(
+      R_PAWN, make_square(FILE_D, RANK_11));
+    position.put_piece(
+      B_QUEEN, make_square(FILE_A, RANK_11));
+    position.put_piece(
+      Y_KNIGHT, make_square(FILE_L, RANK_8));
+    return position;
+}
+
+[[nodiscard]] constexpr Position
+mate_swing_position() noexcept {
+    Position position = kings_only_position();
+    position.put_piece(
+      G_QUEEN, make_square(FILE_K, RANK_7));
+    position.put_piece(
+      R_KNIGHT, make_square(FILE_F, RANK_8));
+    position.put_piece(
+      B_QUEEN, make_square(FILE_M, RANK_5));
+    position.put_piece(
+      Y_KNIGHT, make_square(FILE_G, RANK_3));
+    position.put_piece(
+      G_ROOK, make_square(FILE_G, RANK_7));
+    return position;
+}
+
+[[nodiscard]] constexpr Position
 special_move_position() noexcept {
     Position position;
     position.put_piece(
@@ -429,6 +459,76 @@ void test_budget_primitives() {
              == std::numeric_limits<
                   std::uint64_t>::max(),
       "the unlimited counter cannot wrap beyond uint64 maximum");
+}
+
+void test_aspiration_primitives() {
+    using namespace IterationDetail;
+
+    const AspirationWindow centered =
+      make_aspiration_window(
+        DRAW_SCORE,
+        INITIAL_ASPIRATION_HALF_WIDTH);
+    expect(
+      centered.alpha == -PAWN_VALUE / 2
+        && centered.beta == PAWN_VALUE / 2
+        && centered.contains_exact(DRAW_SCORE)
+        && !centered.contains_exact(centered.alpha)
+        && !centered.contains_exact(centered.beta),
+      "aspiration boundaries distinguish exact scores from bounds");
+
+    const AspirationWindow near_win =
+      make_aspiration_window(
+        INFINITE_SCORE - 10,
+        INITIAL_ASPIRATION_HALF_WIDTH);
+    const AspirationWindow near_loss =
+      make_aspiration_window(
+        -INFINITE_SCORE + 10,
+        INITIAL_ASPIRATION_HALF_WIDTH);
+    expect(
+      near_win.alpha
+          == INFINITE_SCORE - 10
+               - PAWN_VALUE / 2
+        && near_win.beta == INFINITE_SCORE
+        && near_loss.alpha == -INFINITE_SCORE
+        && near_loss.beta
+             == -INFINITE_SCORE + 10
+                  + PAWN_VALUE / 2,
+      "aspiration windows clamp to the alpha-beta score range");
+
+    const AspirationWindow near_mate =
+      make_aspiration_window(
+        MATE_SCORE - 1,
+        INITIAL_ASPIRATION_HALF_WIDTH);
+    expect(
+      near_mate.alpha
+          == MATE_SCORE - 1
+               - PAWN_VALUE / 2
+        && near_mate.beta
+             == MATE_SCORE - 1
+                  + PAWN_VALUE / 2,
+      "mate scores retain a valid narrow aspiration window");
+
+    expect(
+      widen_aspiration_half_width(
+        DRAW_SCORE,
+        Score{400},
+        INITIAL_ASPIRATION_HALF_WIDTH)
+          == 401
+        && widen_aspiration_half_width(
+             DRAW_SCORE,
+             Score{-900},
+             INITIAL_ASPIRATION_HALF_WIDTH)
+             == 901
+        && widen_aspiration_half_width(
+             DRAW_SCORE,
+             -INFINITE_SCORE,
+             FULL_ASPIRATION_HALF_WIDTH / 2)
+             == FULL_ASPIRATION_HALF_WIDTH
+        && make_aspiration_window(
+             MATE_SCORE,
+             FULL_ASPIRATION_HALF_WIDTH)
+             .is_full(),
+      "aspiration widening covers fail-soft bounds and reaches full range");
 }
 
 void test_completed_iterations_match_fixed_search() {
@@ -690,6 +790,186 @@ void test_partial_iteration_never_leaks() {
       "partial-root cancellation restores position and history");
 }
 
+void test_aspiration_researches() {
+    {
+        Position position =
+          teammate_recapture_position();
+        const Position original = position;
+        const std::array keys = {position.key()};
+        PositionHistory history = make_history(keys);
+        const SearchResult depth_two =
+          search(position, history, 2);
+        const SearchResult depth_three =
+          search(position, history, 3);
+        const IterativeResult result =
+          iterative_search(
+            position,
+            history,
+            depth_limits(3));
+        const Score aspiration_width =
+          static_cast<Score>(
+            IterationDetail::INITIAL_ASPIRATION_HALF_WIDTH);
+
+        expect(
+          depth_three.score
+              >= depth_two.score
+                   + aspiration_width
+            && result.stop
+                 == IterativeStop::DEPTH_LIMIT
+            && result.last_completed
+            && result.last_completed->depth == 3
+            && result.last_completed->attempts > 1
+            && result.last_completed->result.score
+                 == depth_three.score
+            && result.last_completed->result.best_move
+                 == depth_three.best_move,
+          "a fail-high is re-searched to the fixed-depth result");
+        expect(
+          positions_equal(position, original)
+            && history_matches(history, keys),
+          "fail-high re-searches preserve position and history");
+    }
+
+    {
+        Position position =
+          forced_evasion_capture_position();
+        position.set_side_to_move(YELLOW);
+        position.put_piece(
+          Y_PAWN, make_square(FILE_E, RANK_2));
+        position.put_piece(
+          Y_PAWN, make_square(FILE_F, RANK_2));
+        const Position original = position;
+        const std::array keys = {position.key()};
+        PositionHistory history = make_history(keys);
+        const SearchResult depth_one =
+          search(position, history, 1);
+        const SearchResult depth_two =
+          search(position, history, 2);
+        const IterativeResult shallow =
+          iterative_search(
+            position,
+            history,
+            depth_limits(1));
+        const IterativeResult complete =
+          iterative_search(
+            position,
+            history,
+            depth_limits(2));
+        const Score aspiration_width =
+          static_cast<Score>(
+            IterationDetail::INITIAL_ASPIRATION_HALF_WIDTH);
+
+        expect(
+          depth_two.score
+              <= depth_one.score
+                   - aspiration_width
+            && complete.stop
+                 == IterativeStop::DEPTH_LIMIT
+            && complete.last_completed
+            && complete.last_completed->depth == 2
+            && complete.last_completed->attempts > 1
+            && complete.last_completed->result.score
+                 == depth_two.score
+            && complete.last_completed->result.best_move
+                 == depth_two.best_move,
+          "a fail-low is re-searched to the fixed-depth result");
+
+        const std::uint64_t interrupted_limit =
+          complete.total_nodes - 1;
+        const IterativeResult interrupted =
+          iterative_search(
+            position,
+            history,
+            node_limits(
+              2, interrupted_limit));
+        expect(
+          interrupted.stop
+              == IterativeStop::NODE_LIMIT
+            && interrupted.total_nodes
+                 == interrupted_limit
+            && interrupted.last_completed
+                 == shallow.last_completed,
+          "an interrupted aspiration re-search retains the prior depth");
+        expect(
+          positions_equal(position, original)
+            && history_matches(history, keys),
+          "fail-low and interrupted re-searches preserve position and history");
+    }
+
+    {
+        Position position =
+          repeated_fail_low_position();
+        const Position original = position;
+        const std::array keys = {position.key()};
+        PositionHistory history = make_history(keys);
+        const SearchResult depth_one =
+          search(position, history, 1);
+        const SearchResult depth_two =
+          search(position, history, 2);
+        const IterativeResult result =
+          iterative_search(
+            position,
+            history,
+            depth_limits(2));
+        const Score aspiration_width =
+          static_cast<Score>(
+            IterationDetail::INITIAL_ASPIRATION_HALF_WIDTH);
+
+        expect(
+          depth_two.score
+              <= depth_one.score
+                   - aspiration_width
+            && result.stop
+                 == IterativeStop::DEPTH_LIMIT
+            && result.last_completed
+            && result.last_completed->depth == 2
+            && result.last_completed->attempts >= 3
+            && result.last_completed->result.score
+                 == depth_two.score
+            && result.last_completed->result.best_move
+                 == depth_two.best_move,
+          "successive fail-low bounds are widened until the score is exact");
+        expect(
+          positions_equal(position, original)
+            && history_matches(history, keys),
+          "successive aspiration re-searches preserve position and history");
+    }
+
+    {
+        Position position = mate_swing_position();
+        const Position original = position;
+        const std::array keys = {position.key()};
+        PositionHistory history = make_history(keys);
+        const SearchResult depth_one =
+          search(position, history, 1);
+        const SearchResult depth_two =
+          search(position, history, 2);
+        const IterativeResult result =
+          iterative_search(
+            position,
+            history,
+            depth_limits(2));
+
+        expect(
+          depth_one.score == Score{-1660}
+            && depth_two.score
+                 == -MATE_SCORE + Score{4}
+            && result.stop
+                 == IterativeStop::DEPTH_LIMIT
+            && result.last_completed
+            && result.last_completed->depth == 2
+            && result.last_completed->attempts >= 4
+            && result.last_completed->result.score
+                 == depth_two.score
+            && result.last_completed->result.has_move(),
+          "mate-band fail-low bounds are re-searched to an exact score");
+        expect(
+          positions_equal(position, original)
+            && history_matches(history, keys),
+          "mate-band aspiration re-searches preserve position and history");
+    }
+}
+
 void test_previous_result_and_table_ordering() {
     Position position =
       teammate_recapture_position();
@@ -717,26 +997,27 @@ void test_previous_result_and_table_ordering() {
     expect(
       fixed_one.nodes == 46
         && fixed_two.nodes == 473
-        && depth_two.total_nodes == 392
+        && depth_two.total_nodes == 309
         && depth_two.last_completed
+        && depth_two.last_completed->attempts == 1
         && depth_two.last_completed->result.nodes
-             == 346
+             == 263
         && depth_two.last_completed->result.score
              == fixed_two.score
         && depth_two.last_completed->result.best_move
              == fixed_two.best_move,
-      "the previous root result reduces depth-two search work");
+      "root ordering and aspiration reduce depth-two search work");
     expect(
       fixed_three.nodes == 2234
-        && depth_three.total_nodes == 1599
+        && depth_three.total_nodes == 1557
         && depth_three.last_completed
         && depth_three.last_completed->result.nodes
-             == 1207
+             == 1248
         && depth_three.last_completed->result.score
              == fixed_three.score
         && depth_three.last_completed->result.best_move
              == fixed_three.best_move,
-      "transposition moves reduce deeper iterative search work");
+      "cached ordering and aspiration reduce deeper iterative search work");
 
     const std::uint64_t complete_limit =
       depth_two.total_nodes;
@@ -923,6 +1204,7 @@ void test_terminal_positions_stop_after_one_iteration() {
             && result.total_nodes == 1
             && result.last_completed
             && result.last_completed->depth == 1
+            && result.last_completed->attempts == 1
             && result.last_completed->result
                  == SearchResult{
                       Move::none(),
@@ -1113,10 +1395,12 @@ void test_invalid_inputs_in_release() {
 
 int main() {
     test_budget_primitives();
+    test_aspiration_primitives();
     test_completed_iterations_match_fixed_search();
     test_exact_node_limits();
     test_nested_cancellation();
     test_partial_iteration_never_leaks();
+    test_aspiration_researches();
     test_previous_result_and_table_ordering();
     test_every_special_state_interruption();
     test_time_limits();
