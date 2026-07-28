@@ -2,11 +2,74 @@
 
 #include <cassert>
 #include <cstddef>
+#include <cstdint>
+#include <utility>
 #include <vector>
 
 #include "zobrist.h"
 
 namespace Mockingbird {
+
+// HistoryContext fingerprints the multiset of recorded position keys. The
+// length provides an exact check on the number of recorded positions.
+struct HistoryContext {
+    std::uint64_t first = 0;
+    std::uint64_t second = 0;
+    std::size_t length = 0;
+
+    [[nodiscard]] friend constexpr bool operator==(
+      const HistoryContext&,
+      const HistoryContext&) noexcept = default;
+};
+
+namespace RepetitionDetail {
+
+[[nodiscard]] constexpr std::uint64_t mix(
+  std::uint64_t value) noexcept {
+    value = (value ^ (value >> 30))
+          * 0xBF58476D1CE4E5B9ULL;
+    value = (value ^ (value >> 27))
+          * 0x94D049BB133111EBULL;
+    return value ^ (value >> 31);
+}
+
+[[nodiscard]] constexpr std::uint64_t first_component(
+  PositionKey key) noexcept {
+    return mix(key ^ 0x243F6A8885A308D3ULL);
+}
+
+[[nodiscard]] constexpr std::uint64_t second_component(
+  PositionKey key) noexcept {
+    return mix(key ^ 0x13198A2E03707344ULL);
+}
+
+[[nodiscard]] constexpr HistoryContext make_context(
+  PositionKey key) noexcept {
+    return {
+      first_component(key),
+      second_component(key),
+      1,
+    };
+}
+
+constexpr void add(
+  HistoryContext& context,
+  PositionKey key) noexcept {
+    context.first += first_component(key);
+    context.second += second_component(key);
+    ++context.length;
+}
+
+constexpr void remove(
+  HistoryContext& context,
+  PositionKey key) noexcept {
+    assert(context.length > 1);
+    context.first -= first_component(key);
+    context.second -= second_component(key);
+    --context.length;
+}
+
+}  // namespace RepetitionDetail
 
 // PositionHistory stores one key for every visited position, including the
 // initial position. Repetition queries report key occurrences and do not
@@ -16,13 +79,17 @@ class PositionHistory {
     static constexpr std::size_t INITIAL_RESERVE = 1024;
 
     constexpr explicit PositionHistory(
-      PositionKey initial_key) {
+      PositionKey initial_key)
+        : context_(
+            RepetitionDetail::make_context(
+              initial_key)) {
         keys_.reserve(INITIAL_RESERVE);
         keys_.push_back(initial_key);
     }
 
     constexpr PositionHistory(
-      const PositionHistory& other) {
+      const PositionHistory& other)
+        : context_(other.context_) {
         assert(!other.keys_.empty());
 
         const std::size_t reserve_size =
@@ -45,6 +112,7 @@ class PositionHistory {
 
         PositionHistory replacement{other};
         keys_.swap(replacement.keys_);
+        std::swap(context_, replacement.context_);
         return *this;
     }
 
@@ -67,6 +135,12 @@ class PositionHistory {
         return keys_.back();
     }
 
+    [[nodiscard]] constexpr const HistoryContext&
+    context() const noexcept {
+        assert(!keys_.empty());
+        return context_;
+    }
+
     // Discards the recorded line and establishes a new initial position.
     constexpr void reset(PositionKey initial_key) {
         if (keys_.capacity() < INITIAL_RESERVE)
@@ -74,11 +148,14 @@ class PositionHistory {
 
         keys_.clear();
         keys_.push_back(initial_key);
+        context_ =
+          RepetitionDetail::make_context(initial_key);
     }
 
     constexpr void push(PositionKey key) {
         assert(!keys_.empty());
         keys_.push_back(key);
+        RepetitionDetail::add(context_, key);
     }
 
     // Preconditions: the history contains a child of the initial position,
@@ -88,6 +165,8 @@ class PositionHistory {
         assert(keys_.size() > 1);
         assert(keys_.back() == expected_current);
         static_cast<void>(expected_current);
+        RepetitionDetail::remove(
+          context_, keys_.back());
         keys_.pop_back();
     }
 
@@ -137,6 +216,11 @@ class PositionHistory {
     }
 
     std::vector<PositionKey> keys_;
+    HistoryContext context_;
 };
+
+static_assert(
+  RepetitionDetail::first_component(0)
+  != RepetitionDetail::second_component(0));
 
 }  // namespace Mockingbird

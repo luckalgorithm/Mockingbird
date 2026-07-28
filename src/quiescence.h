@@ -10,6 +10,7 @@
 #include "evaluate.h"
 #include "ordering.h"
 #include "result.h"
+#include "transposition.h"
 #include "transition.h"
 
 namespace Mockingbird {
@@ -33,8 +34,10 @@ class BasicSearchState {
     constexpr BasicSearchState() noexcept = default;
 
     constexpr explicit BasicSearchState(
-      Budget budget) noexcept
-        : budget_(std::move(budget)) {}
+      Budget budget,
+      TranspositionTable* table = nullptr) noexcept
+        : budget_(std::move(budget)),
+          table_(table) {}
 
     [[nodiscard]] NodeEntry enter_node() noexcept {
         return budget_.enter_node(nodes);
@@ -45,11 +48,17 @@ class BasicSearchState {
         return budget_;
     }
 
+    [[nodiscard]] constexpr TranspositionTable*
+    table() const noexcept {
+        return table_;
+    }
+
     std::uint64_t nodes = 0;
     MoveOrderingBuffer ordering_buffer;
 
   private:
     Budget budget_;
+    TranspositionTable* table_ = nullptr;
 };
 
 using SearchState =

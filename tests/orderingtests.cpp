@@ -1119,6 +1119,93 @@ void test_en_passant_promotions() {
     }
 }
 
+void test_preferred_move_ordering() {
+    Position position =
+      material_tactic_position();
+    const Position original = position;
+    const Move capture = Move::normal(
+      make_square(FILE_F, RANK_5),
+      make_square(FILE_F, RANK_8));
+
+    MoveList legal_moves;
+    generate_legal_moves(position, legal_moves);
+    Move first_quiet = Move::none();
+    Move second_quiet = Move::none();
+    for (const Move move : legal_moves) {
+        if (is_tactical_move(position, move))
+            continue;
+
+        if (!first_quiet.is_board_move())
+            first_quiet = move;
+        else {
+            second_quiet = move;
+            break;
+        }
+    }
+
+    expect(
+      contains_move(legal_moves, capture)
+        && first_quiet.is_board_move()
+        && second_quiet.is_board_move(),
+      "the preferred-order fixture contains every tested move");
+    if (!contains_move(legal_moves, capture)
+        || !first_quiet.is_board_move()
+        || !second_quiet.is_board_move())
+        return;
+
+    MoveList baseline;
+    baseline.push_back(first_quiet);
+    baseline.push_back(capture);
+    baseline.push_back(second_quiet);
+    order_moves(position, baseline);
+    expect(
+      baseline[0] == capture
+        && baseline[1] == first_quiet
+        && baseline[2] == second_quiet,
+      "material ordering establishes the preferred-order baseline");
+
+    MoveList preferred;
+    preferred.push_back(first_quiet);
+    preferred.push_back(capture);
+    preferred.push_back(second_quiet);
+    order_moves(
+      position, preferred, second_quiet);
+    expect(
+      preferred[0] == second_quiet
+        && preferred[1] == capture
+        && preferred[2] == first_quiet,
+      "the preferred move leads while the sorted tail remains stable");
+
+    const Move absent = Move::normal(
+      make_square(FILE_D, RANK_1),
+      make_square(FILE_D, RANK_2));
+    for (const Move hint :
+         {Move::none(), Move::null(), absent}) {
+        MoveList unchanged;
+        unchanged.push_back(first_quiet);
+        unchanged.push_back(capture);
+        unchanged.push_back(second_quiet);
+        order_moves(position, unchanged, hint);
+
+        expect(
+          unchanged[0] == capture
+            && unchanged[1] == first_quiet
+            && unchanged[2] == second_quiet,
+          "an absent or non-board hint leaves material order unchanged");
+    }
+
+    order_moves(
+      position, preferred, second_quiet);
+    expect(
+      preferred[0] == second_quiet
+        && preferred[1] == capture
+        && preferred[2] == first_quiet,
+      "reapplying an existing first preference is idempotent");
+    expect(
+      positions_equal(position, original),
+      "preferred move ordering preserves every position field");
+}
+
 struct ReferenceResult {
     Move best_move = Move::none();
     Score score = DRAW_SCORE;
@@ -1351,6 +1438,7 @@ int main() {
     test_stable_equal_scores();
     test_en_passant_capture_values();
     test_en_passant_promotions();
+    test_preferred_move_ordering();
     test_search_integration();
 
     if (failures != 0) {

@@ -228,6 +228,17 @@ class MoveOrderingBuffer {
 
 namespace OrderingDetail {
 
+[[nodiscard]] constexpr bool contains_move(
+  const MoveList& moves,
+  Move expected) noexcept {
+    for (const Move move : moves) {
+        if (move == expected)
+            return true;
+    }
+
+    return false;
+}
+
 [[nodiscard]] constexpr Move source_move(
   const MoveList& moves,
   const MoveOrderingBuffer& buffer,
@@ -339,49 +350,72 @@ constexpr void merge_pass(
 }  // namespace OrderingDetail
 
 // Orders moves by descending material-order score using stable bottom-up merge
-// sort. The position is unchanged and no dynamic allocation is performed.
+// sort. A preferred move contained in the list is moved to the first position;
+// every other move retains its sorted relative order. The position is
+// unchanged and no dynamic allocation is performed.
 // Preconditions:
 // - every entry in moves was generated for position;
 // - buffer is not in use by another order_moves() call.
 constexpr void order_moves(
   const Position& position,
   MoveList& moves,
-  MoveOrderingBuffer& buffer) noexcept {
-    if (moves.size() < 2)
+  MoveOrderingBuffer& buffer,
+  Move preferred = Move::none()) noexcept {
+    if (moves.size() >= 2) {
+        bool source_is_move_list = true;
+        std::size_t width = 1;
+
+        while (width < moves.size()) {
+            OrderingDetail::merge_pass(
+              position,
+              moves,
+              buffer,
+              width,
+              source_is_move_list);
+            source_is_move_list =
+              !source_is_move_list;
+
+            if (width > moves.size() / 2)
+                width = moves.size();
+            else
+                width *= 2;
+        }
+
+        if (!source_is_move_list) {
+            for (std::size_t index = 0;
+                 index < moves.size();
+                 ++index)
+                moves[index] = buffer[index];
+        }
+    }
+
+    if (!preferred.is_board_move())
         return;
 
-    bool source_is_move_list = true;
-    std::size_t width = 1;
+    std::size_t preferred_index = 0;
+    while (preferred_index < moves.size()
+           && moves[preferred_index] != preferred)
+        ++preferred_index;
 
-    while (width < moves.size()) {
-        OrderingDetail::merge_pass(
-          position,
-          moves,
-          buffer,
-          width,
-          source_is_move_list);
-        source_is_move_list = !source_is_move_list;
+    if (preferred_index == moves.size())
+        return;
 
-        if (width > moves.size() / 2)
-            width = moves.size();
-        else
-            width *= 2;
-    }
+    for (std::size_t index = preferred_index;
+         index > 0;
+         --index)
+        moves[index] = moves[index - 1];
 
-    if (!source_is_move_list) {
-        for (std::size_t index = 0;
-             index < moves.size();
-             ++index)
-            moves[index] = buffer[index];
-    }
+    moves[0] = preferred;
 }
 
 // This overload owns its temporary merge-sort buffer.
 constexpr void order_moves(
   const Position& position,
-  MoveList& moves) noexcept {
+  MoveList& moves,
+  Move preferred = Move::none()) noexcept {
     MoveOrderingBuffer buffer;
-    order_moves(position, moves, buffer);
+    order_moves(
+      position, moves, buffer, preferred);
 }
 
 static_assert(OrderingDetail::QUIET_SCORE

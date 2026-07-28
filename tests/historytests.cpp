@@ -217,6 +217,8 @@ static_assert(noexcept(
 static_assert(noexcept(
   std::declval<const PositionHistory&>().current_key()));
 static_assert(noexcept(
+  std::declval<const PositionHistory&>().context()));
+static_assert(noexcept(
   std::declval<const PositionHistory&>().count(KEY_A)));
 static_assert(noexcept(
   std::declval<const PositionHistory&>().current_count()));
@@ -231,6 +233,60 @@ static_assert(!noexcept(
   std::declval<PositionHistory&>().reset(KEY_A)));
 static_assert(!noexcept(
   std::declval<PositionHistory&>().push(KEY_A)));
+
+void test_history_context() {
+    PositionHistory first{KEY_A};
+    first.push(KEY_B);
+    first.push(KEY_C);
+    first.push(KEY_D);
+
+    PositionHistory reordered{KEY_C};
+    reordered.push(KEY_A);
+    reordered.push(KEY_B);
+    reordered.push(KEY_D);
+
+    expect(
+      first.context() == reordered.context(),
+      "equal key multisets have equal history contexts");
+
+    PositionHistory different{KEY_A};
+    different.push(KEY_B);
+    different.push(KEY_E);
+    different.push(KEY_D);
+    expect(
+      first.context() != different.context(),
+      "different equal-length key multisets have different contexts");
+
+    const HistoryContext before_branch =
+      first.context();
+    first.push(KEY_A);
+    expect(
+      first.context() != before_branch
+        && first.context().length == 5,
+      "pushing a key updates both fingerprints and the length");
+    first.pop(KEY_A);
+    expect(
+      first.context() == before_branch,
+      "popping a key restores the preceding history context");
+
+    const PositionHistory copied{first};
+    expect(
+      copied.context() == first.context(),
+      "copy construction preserves the history context");
+
+    PositionHistory assigned{KEY_E};
+    assigned = first;
+    expect(
+      assigned.context() == first.context(),
+      "copy assignment preserves the history context");
+
+    assigned.reset(KEY_E);
+    const PositionHistory reset_reference{KEY_E};
+    expect(
+      assigned.context()
+        == reset_reference.context(),
+      "reset replaces the complete history context");
+}
 
 void test_seed_reset_and_thresholds() {
     PositionHistory history{KEY_A};
@@ -746,6 +802,7 @@ void test_generation_and_perft_noninterference() {
 }  // namespace
 
 int main() {
+    test_history_context();
     test_seed_reset_and_thresholds();
     test_growth_and_full_unwind();
     test_copying_and_branching();

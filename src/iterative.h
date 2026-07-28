@@ -85,6 +85,9 @@ iterative_stop(SearchStopReason reason) noexcept {
 
 // Searches consecutive depths and retains only the deepest completed
 // iteration. Node and time limits are cumulative across the complete call.
+// One transposition table is shared by every iteration. The previous
+// completed root move is ordered first in the next iteration when it remains
+// legal.
 // Time is checked when a node is entered, so one active node can finish after
 // the requested duration.
 //
@@ -142,9 +145,13 @@ iterative_stop(SearchStopReason reason) noexcept {
 
     SearchDetail::SearchBudget budget{
       limits.node_limit, deadline};
+    TranspositionTable table;
+    table.new_search();
     SearchDetail::LimitedSearchState state{
-      std::move(budget)};
+      std::move(budget),
+      &table};
     PositionHistory search_history{history};
+    Move previous_best = Move::none();
 
     for (int depth = 1;
          depth <= limits.max_depth;
@@ -159,7 +166,8 @@ iterative_stop(SearchStopReason reason) noexcept {
             0,
             -INFINITE_SCORE,
             INFINITE_SCORE,
-            state);
+            state,
+            previous_best);
 
         assert(
           search_history.current_key()
@@ -188,6 +196,8 @@ iterative_stop(SearchStopReason reason) noexcept {
             return finish(
               IterativeStop::TERMINAL_POSITION);
         }
+
+        previous_best = iteration->best_move;
     }
 
     return finish(IterativeStop::DEPTH_LIMIT);

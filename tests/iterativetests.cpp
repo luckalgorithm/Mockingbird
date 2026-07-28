@@ -50,17 +50,6 @@ void expect(bool condition, std::string_view message) {
     return false;
 }
 
-[[nodiscard]] constexpr bool contains_move(
-  const MoveList& moves,
-  Move expected) noexcept {
-    for (const Move move : moves) {
-        if (move == expected)
-            return true;
-    }
-
-    return false;
-}
-
 [[nodiscard]] constexpr bool positions_equal(
   const Position& left,
   const Position& right) noexcept {
@@ -669,47 +658,116 @@ void test_partial_iteration_never_leaks() {
     const Position original = position;
     const std::array keys = {position.key()};
     PositionHistory history = make_history(keys);
-    const Move first_tactical_move = Move::normal(
-      make_square(FILE_F, RANK_5),
-      make_square(FILE_F, RANK_6));
-
-    MoveList legal_moves;
-    generate_legal_moves(position, legal_moves);
-    order_moves(position, legal_moves);
+    const IterativeResult completed =
+      iterative_search(
+        position,
+        history,
+        depth_limits(2));
     expect(
-      contains_move(
-        legal_moves, first_tactical_move)
-        && legal_moves[0] == first_tactical_move,
-      "the partial-iteration fixture searches the pawn capture first");
+      completed.stop
+          == IterativeStop::DEPTH_LIMIT
+        && completed.last_completed
+        && completed.last_completed->depth == 2,
+      "the partial-iteration fixture completes depth two");
 
-    const SearchResult completed =
-      search(position, history, 2);
-    const Move completed_move = Move::normal(
-      make_square(FILE_F, RANK_5),
-      make_square(FILE_A, RANK_5));
-    expect(
-      completed.nodes == 473
-        && completed.score == QUEEN_VALUE
-        && completed.best_move == completed_move,
-      "the partial-iteration fixture retains its depth-two baseline");
+    const std::uint64_t partial_limit =
+      completed.total_nodes + 1;
 
     const IterativeResult result =
       iterative_search(
         position,
         history,
-        node_limits(3, 584));
+        node_limits(3, partial_limit));
     expect(
       result.stop == IterativeStop::NODE_LIMIT
-        && result.total_nodes == 584
+        && result.total_nodes == partial_limit
         && result.last_completed
-        && result.last_completed->depth == 2
-        && result.last_completed->result
-             == completed,
-      "a provisional deeper root result cannot replace depth two");
+             == completed.last_completed,
+      "an interrupted depth-three root cannot replace depth two");
     expect(
       positions_equal(position, original)
         && history_matches(history, keys),
       "partial-root cancellation restores position and history");
+}
+
+void test_previous_result_and_table_ordering() {
+    Position position =
+      teammate_recapture_position();
+    const Position original = position;
+    const std::array keys = {position.key()};
+    PositionHistory history = make_history(keys);
+
+    const SearchResult fixed_one =
+      search(position, history, 1);
+    const SearchResult fixed_two =
+      search(position, history, 2);
+    const SearchResult fixed_three =
+      search(position, history, 3);
+    const IterativeResult depth_two =
+      iterative_search(
+        position,
+        history,
+        depth_limits(2));
+    const IterativeResult depth_three =
+      iterative_search(
+        position,
+        history,
+        depth_limits(3));
+
+    expect(
+      fixed_one.nodes == 46
+        && fixed_two.nodes == 473
+        && depth_two.total_nodes == 392
+        && depth_two.last_completed
+        && depth_two.last_completed->result.nodes
+             == 346
+        && depth_two.last_completed->result.score
+             == fixed_two.score
+        && depth_two.last_completed->result.best_move
+             == fixed_two.best_move,
+      "the previous root result reduces depth-two search work");
+    expect(
+      fixed_three.nodes == 2234
+        && depth_three.total_nodes == 1599
+        && depth_three.last_completed
+        && depth_three.last_completed->result.nodes
+             == 1207
+        && depth_three.last_completed->result.score
+             == fixed_three.score
+        && depth_three.last_completed->result.best_move
+             == fixed_three.best_move,
+      "transposition moves reduce deeper iterative search work");
+
+    const std::uint64_t complete_limit =
+      depth_two.total_nodes;
+    const IterativeResult interrupted =
+      iterative_search(
+        position,
+        history,
+        node_limits(2, complete_limit - 1));
+    const IterativeResult exact =
+      iterative_search(
+        position,
+        history,
+        node_limits(2, complete_limit));
+    expect(
+      interrupted.stop
+          == IterativeStop::NODE_LIMIT
+        && interrupted.total_nodes
+             == complete_limit - 1
+        && interrupted.last_completed
+        && interrupted.last_completed->depth == 1
+        && exact.stop
+             == IterativeStop::DEPTH_LIMIT
+        && exact.total_nodes
+             == complete_limit
+        && exact.last_completed
+        && exact.last_completed->depth == 2,
+      "node limits remain exact across reordered cached iterations");
+    expect(
+      positions_equal(position, original)
+        && history_matches(history, keys),
+      "cached iterative searches preserve position and history");
 }
 
 void test_every_special_state_interruption() {
@@ -1059,6 +1117,7 @@ int main() {
     test_exact_node_limits();
     test_nested_cancellation();
     test_partial_iteration_never_leaks();
+    test_previous_result_and_table_ordering();
     test_every_special_state_interruption();
     test_time_limits();
     test_terminal_positions_stop_after_one_iteration();
