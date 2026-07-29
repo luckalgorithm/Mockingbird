@@ -1,6 +1,7 @@
 #include "iterative.h"
 
 #include <array>
+#include <atomic>
 #include <cassert>
 #include <chrono>
 #include <cstddef>
@@ -1186,6 +1187,50 @@ void test_time_limits() {
       "time-limited searches preserve position and history");
 }
 
+void test_pre_stopped_external_signal() {
+    Position position = special_move_position();
+    const Position original = position;
+    const PositionKey key = position.key();
+    const std::array keys = {
+      key ^ PositionKey{0x1010101010101010ULL},
+      key ^ PositionKey{0x2020202020202020ULL},
+      key,
+    };
+    PositionHistory history = make_history(keys);
+    const HistoryContext original_context =
+      history.context();
+    const std::size_t original_capacity =
+      history.capacity();
+
+    std::atomic_bool stop_requested{true};
+    IterativeLimits limits =
+      depth_limits(MAX_SEARCH_DEPTH);
+    limits.external_stop = &stop_requested;
+
+    const IterativeResult result =
+      iterative_search(position, history, limits);
+
+    expect(
+      result.stop == IterativeStop::EXTERNAL_STOP
+        && result.total_nodes == 0
+        && !result.last_completed
+        && !result.has_completed_iteration()
+        && !result.has_move()
+        && result.elapsed >= SearchDuration::zero(),
+      "a pre-set external signal stops before the first search node");
+    expect(
+      stop_requested.load(std::memory_order_relaxed),
+      "iterative search does not clear the caller's external signal");
+    expect(
+      positions_equal(position, original),
+      "a pre-stopped external search preserves every position field");
+    expect(
+      history.capacity() == original_capacity
+        && history.context() == original_context
+        && history_matches(history, keys),
+      "a pre-stopped external search preserves the complete history");
+}
+
 void test_terminal_positions_stop_after_one_iteration() {
     {
         Position position = blocked_corner(true);
@@ -1406,6 +1451,7 @@ int main() {
     test_previous_result_and_table_ordering();
     test_every_special_state_interruption();
     test_time_limits();
+    test_pre_stopped_external_signal();
     test_terminal_positions_stop_after_one_iteration();
     test_invalid_inputs_in_release();
 

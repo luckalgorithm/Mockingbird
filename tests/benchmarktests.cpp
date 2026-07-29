@@ -404,7 +404,7 @@ void test_synthetic_format() {
 
     const std::string expected =
       "negative: depth 2, best none, score -123, nodes 456\n"
-      "normal: depth 3, best d1-d2, score 789, nodes 10\n"
+      "normal: depth 3, best d1d2, score 789, nodes 10\n"
       "zero-a: depth 0, best none, score 0, nodes 0\n"
       "zero-b: depth 0, best none, score 0, nodes 0\n"
       "zero-c: depth 0, best none, score 0, nodes 0\n"

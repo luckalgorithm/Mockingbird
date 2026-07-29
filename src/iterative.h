@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <cassert>
 #include <chrono>
 #include <cstdint>
@@ -15,6 +16,9 @@ struct IterativeLimits {
     int max_depth = 1;
     std::optional<std::uint64_t> node_limit;
     std::optional<SearchDuration> time_limit;
+    // The caller retains ownership of this flag for the complete search.
+    // A true value stops search at the next node-entry budget check.
+    const std::atomic_bool* external_stop = nullptr;
 };
 
 enum class IterativeStop : std::uint8_t {
@@ -22,6 +26,7 @@ enum class IterativeStop : std::uint8_t {
     TERMINAL_POSITION,
     NODE_LIMIT,
     TIME_LIMIT,
+    EXTERNAL_STOP,
     INVALID_LIMITS,
     INVALID_INPUT,
 };
@@ -180,6 +185,9 @@ iterative_stop(SearchStopReason reason) noexcept {
 
         case SearchStopReason::TIME_LIMIT:
             return IterativeStop::TIME_LIMIT;
+
+        case SearchStopReason::EXTERNAL_STOP:
+            return IterativeStop::EXTERNAL_STOP;
     }
 
     assert(false);
@@ -206,10 +214,13 @@ iterative_stop(SearchStopReason reason) noexcept {
 // - time_limit is absent or non-negative;
 // - history.current_key() equals position.key();
 // - the position has a result-valid king layout.
-[[nodiscard]] inline IterativeResult iterative_search(
+namespace IterationDetail {
+
+[[nodiscard]] inline IterativeResult iterative_search_impl(
   Position& position,
   const PositionHistory& history,
-  const IterativeLimits& limits) {
+  const IterativeLimits& limits,
+  TranspositionTable& table) {
     const SearchClock::time_point start =
       SearchClock::now();
     IterativeResult result;
@@ -251,8 +262,9 @@ iterative_stop(SearchStopReason reason) noexcept {
     }
 
     SearchDetail::SearchBudget budget{
-      limits.node_limit, deadline};
-    TranspositionTable table;
+      limits.node_limit,
+      deadline,
+      limits.external_stop};
     table.new_search();
     SearchDetail::LimitedSearchState state{
       std::move(budget),
@@ -352,6 +364,29 @@ iterative_stop(SearchStopReason reason) noexcept {
     }
 
     return finish(IterativeStop::DEPTH_LIMIT);
+}
+
+}  // namespace IterationDetail
+
+// Reuses table across root searches. Entries remain qualified by their
+// position key and repetition-history context.
+[[nodiscard]] inline IterativeResult iterative_search(
+  Position& position,
+  const PositionHistory& history,
+  const IterativeLimits& limits,
+  TranspositionTable& table) {
+    return IterationDetail::iterative_search_impl(
+      position, history, limits, table);
+}
+
+// Uses a new default-sized transposition table for this call.
+[[nodiscard]] inline IterativeResult iterative_search(
+  Position& position,
+  const PositionHistory& history,
+  const IterativeLimits& limits) {
+    TranspositionTable table;
+    return IterationDetail::iterative_search_impl(
+      position, history, limits, table);
 }
 
 static_assert(

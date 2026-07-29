@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <cassert>
 #include <chrono>
 #include <cstdint>
@@ -15,6 +16,7 @@ using SearchDuration = SearchClock::duration;
 enum class SearchStopReason : std::uint8_t {
     NODE_LIMIT,
     TIME_LIMIT,
+    EXTERNAL_STOP,
 };
 
 namespace SearchDetail {
@@ -56,22 +58,32 @@ class UnlimitedBudget {
     }
 };
 
-// SearchBudget applies cumulative limits at node entry. The node limit is
-// checked before the deadline when both stop conditions are true.
+// SearchBudget applies cumulative limits at node entry. An external stop is
+// checked first. The node limit precedes the deadline when both are reached.
 class SearchBudget {
   public:
     constexpr SearchBudget() noexcept = default;
 
     constexpr SearchBudget(
       std::optional<std::uint64_t> node_limit,
-      std::optional<SearchClock::time_point> deadline) noexcept
+      std::optional<SearchClock::time_point> deadline,
+      const std::atomic_bool* external_stop = nullptr) noexcept
         : node_limit_(node_limit),
-          deadline_(deadline) {}
+          deadline_(deadline),
+          external_stop_(external_stop) {}
 
     [[nodiscard]] NodeEntry enter_node(
       std::uint64_t& nodes) noexcept {
         if (stop_reason_)
             return std::unexpected(*stop_reason_);
+
+        if (external_stop_
+            && external_stop_->load(
+                 std::memory_order_relaxed)) {
+            stop_reason_ =
+              SearchStopReason::EXTERNAL_STOP;
+            return std::unexpected(*stop_reason_);
+        }
 
         if (nodes
               == std::numeric_limits<std::uint64_t>::max()
@@ -102,6 +114,7 @@ class SearchBudget {
   private:
     std::optional<std::uint64_t> node_limit_;
     std::optional<SearchClock::time_point> deadline_;
+    const std::atomic_bool* external_stop_ = nullptr;
     std::optional<SearchStopReason> stop_reason_;
 };
 

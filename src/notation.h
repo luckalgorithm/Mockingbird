@@ -66,11 +66,45 @@ using PositionParseResult =
 [[nodiscard]] std::string serialize_position(
   const Position& position);
 
-// Board moves use source-destination coordinates. Promotions append =N, =B,
-// =R, or =Q. Castling and en-passant moves append " (castling)" and
-// " (en passant)" respectively. Move::none() and Move::null() use "none" and
-// "null". The '-' separator does not imply capture status because Move does
-// not store whether the destination contained a captured piece.
+enum class MoveNotationError : std::uint8_t {
+    EMPTY,
+    SOURCE_FILE,
+    SOURCE_RANK,
+    SOURCE_SQUARE,
+    DESTINATION_FILE,
+    DESTINATION_RANK,
+    DESTINATION_SQUARE,
+    PROMOTION,
+    TRAILING_CHARACTERS,
+    ILLEGAL,
+    AMBIGUOUS,
+};
+
+// offset is the zero-based byte position associated with the failure.
+struct MoveNotationFailure {
+    MoveNotationError code = MoveNotationError::EMPTY;
+    std::size_t offset = 0;
+
+    [[nodiscard]] friend constexpr bool operator==(
+      const MoveNotationFailure&,
+      const MoveNotationFailure&) noexcept = default;
+};
+
+using MoveParseResult =
+  std::expected<Move, MoveNotationFailure>;
+
+// Board-move text contains a source coordinate followed immediately by a
+// destination coordinate. Promotion text appends n, b, r, or q. ASCII
+// uppercase file and promotion letters are accepted. Legal-move matching
+// supplies the internal normal, promotion, castling, or en-passant type.
+// "none" and "0000" represent Move::none() and Move::null().
+[[nodiscard]] MoveParseResult parse_move(
+  const Position& position,
+  std::string_view notation) noexcept;
+
+// Board moves use compact lowercase coordinate text. Promotions append n, b,
+// r, or q. Castling and en-passant use only their source and destination
+// coordinates. Move::none() and Move::null() use "none" and "0000".
 [[nodiscard]] std::string serialize_move(Move move);
 
 // Produces "<move>: <nodes>" lines in list order, followed by "Total: <nodes>"

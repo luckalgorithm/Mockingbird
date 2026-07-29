@@ -1,5 +1,6 @@
 #include "notation.h"
 
+#include "legal.h"
 #include "perft.h"
 
 #include <array>
@@ -54,6 +55,31 @@ inline constexpr std::array<char, PIECE_TYPE_NB>
     return character >= '0' && character <= '9';
 }
 
+[[nodiscard]] constexpr char ascii_lower(
+  char character) noexcept {
+    return character >= 'A' && character <= 'Z'
+      ? static_cast<char>(character - 'A' + 'a')
+      : character;
+}
+
+[[nodiscard]] constexpr bool ascii_case_equal(
+  std::string_view left,
+  std::string_view right) noexcept {
+    if (left.size() != right.size())
+        return false;
+
+    for (std::size_t index = 0;
+         index < left.size();
+         ++index) {
+        if (ascii_lower(left[index])
+            != ascii_lower(right[index])) {
+            return false;
+        }
+    }
+
+    return true;
+}
+
 [[nodiscard]] constexpr Color parse_color(
   char character) noexcept {
     for (int color_index = 0;
@@ -99,6 +125,14 @@ inline constexpr std::array<char, PIECE_TYPE_NB>
   std::size_t offset) noexcept {
     return std::unexpected(
       NotationFailure{error, offset});
+}
+
+[[nodiscard]] std::unexpected<MoveNotationFailure>
+fail_move(
+  MoveNotationError error,
+  std::size_t offset) noexcept {
+    return std::unexpected(
+      MoveNotationFailure{error, offset});
 }
 
 [[nodiscard]] std::expected<Fields, NotationFailure>
@@ -456,6 +490,92 @@ parse_en_passant(
     return {};
 }
 
+[[nodiscard]] std::expected<
+  Square,
+  MoveNotationFailure>
+parse_move_square(
+  std::string_view text,
+  std::size_t& cursor,
+  MoveNotationError file_error,
+  MoveNotationError rank_error,
+  MoveNotationError square_error) noexcept {
+    const std::size_t file_offset = cursor;
+    if (cursor >= text.size()) {
+        return fail_move(
+          file_error, cursor);
+    }
+
+    const char file_character =
+      ascii_lower(text[cursor]);
+    if (file_character < 'a'
+        || file_character > 'n') {
+        return fail_move(
+          file_error, cursor);
+    }
+    ++cursor;
+
+    const std::size_t rank_offset = cursor;
+    if (cursor >= text.size()
+        || !is_ascii_digit(text[cursor])) {
+        return fail_move(
+          rank_error, cursor);
+    }
+    if (text[cursor] == '0') {
+        return fail_move(
+          rank_error, cursor);
+    }
+
+    while (cursor < text.size()
+           && is_ascii_digit(text[cursor])) {
+        ++cursor;
+    }
+
+    const std::string_view rank_text =
+      text.substr(
+        rank_offset, cursor - rank_offset);
+    int rank_value = 0;
+    const auto conversion =
+      std::from_chars(
+        rank_text.data(),
+        rank_text.data() + rank_text.size(),
+        rank_value);
+    if (conversion.ec != std::errc{}
+        || conversion.ptr
+             != rank_text.data() + rank_text.size()
+        || rank_value < RANK_1
+        || rank_value > RANK_14) {
+        return fail_move(
+          rank_error, rank_offset);
+    }
+
+    const File file =
+      File(file_character - 'a' + FILE_A);
+    const Square square =
+      make_square(file, Rank(rank_value));
+    if (!is_ok(square)) {
+        return fail_move(
+          square_error, file_offset);
+    }
+
+    return square;
+}
+
+[[nodiscard]] constexpr PieceType
+parse_promotion_type(char character) noexcept {
+    switch (ascii_lower(character)) {
+        case 'n':
+            return KNIGHT;
+        case 'b':
+            return BISHOP;
+        case 'r':
+            return ROOK;
+        case 'q':
+            return QUEEN;
+        default:
+            return NO_PIECE_TYPE;
+    }
+}
+
 template<typename Integer>
 void append_decimal(
   std::string& output, Integer value) {
@@ -485,37 +605,18 @@ void append_move(
         return;
     }
     if (move.is_null()) {
-        output += "null";
+        output += "0000";
         return;
     }
 
     assert(is_ok(move));
     append_square(output, move.from());
-    output += '-';
     append_square(output, move.to());
 
     if (move.is_promotion()) {
-        output += '=';
-        output +=
-          piece_type_character(move.promotion_type());
-    }
-
-    switch (move.type()) {
-        case MoveType::NORMAL:
-        case MoveType::PROMOTION:
-            break;
-
-        case MoveType::CASTLING:
-            output += " (castling)";
-            break;
-
-        case MoveType::EN_PASSANT:
-            output += " (en passant)";
-            break;
-
-        case MoveType::COUNT:
-            assert(false);
-            break;
+        output += ascii_lower(
+          piece_type_character(
+            move.promotion_type()));
     }
 }
 
@@ -658,9 +759,107 @@ std::string serialize_position(
     return notation;
 }
 
+MoveParseResult parse_move(
+  const Position& position,
+  std::string_view notation) noexcept {
+    if (notation.empty()) {
+        return fail_move(
+          MoveNotationError::EMPTY, 0);
+    }
+    if (ascii_case_equal(notation, "none"))
+        return Move::none();
+    if (notation == "0000")
+        return Move::null();
+
+    std::size_t cursor = 0;
+    const auto source =
+      parse_move_square(
+        notation,
+        cursor,
+        MoveNotationError::SOURCE_FILE,
+        MoveNotationError::SOURCE_RANK,
+        MoveNotationError::SOURCE_SQUARE);
+    if (!source)
+        return std::unexpected(source.error());
+
+    const auto destination =
+      parse_move_square(
+        notation,
+        cursor,
+        MoveNotationError::DESTINATION_FILE,
+        MoveNotationError::DESTINATION_RANK,
+        MoveNotationError::DESTINATION_SQUARE);
+    if (!destination)
+        return std::unexpected(
+          destination.error());
+
+    PieceType promotion = NO_PIECE_TYPE;
+    std::size_t promotion_offset = cursor;
+    if (cursor < notation.size()) {
+        promotion =
+          parse_promotion_type(
+            notation[cursor]);
+        if (promotion == NO_PIECE_TYPE) {
+            return fail_move(
+              MoveNotationError::PROMOTION,
+              cursor);
+        }
+
+        promotion_offset = cursor;
+        ++cursor;
+    }
+
+    if (cursor != notation.size()) {
+        return fail_move(
+          MoveNotationError::TRAILING_CHARACTERS,
+          cursor);
+    }
+
+    Position working = position;
+    MoveList legal_moves;
+    generate_legal_moves(
+      working, legal_moves);
+
+    Move matched = Move::none();
+    bool found = false;
+    for (const Move move : legal_moves) {
+        if (move.from() != *source
+            || move.to() != *destination) {
+            continue;
+        }
+
+        const bool promotion_matches =
+          promotion == NO_PIECE_TYPE
+            ? !move.is_promotion()
+            : move.is_promotion()
+              && move.promotion_type() == promotion;
+        if (!promotion_matches)
+            continue;
+
+        if (found) {
+            return fail_move(
+              MoveNotationError::AMBIGUOUS,
+              0);
+        }
+
+        matched = move;
+        found = true;
+    }
+
+    if (!found) {
+        return fail_move(
+          MoveNotationError::ILLEGAL,
+          promotion == NO_PIECE_TYPE
+            ? 0
+            : promotion_offset);
+    }
+
+    return matched;
+}
+
 std::string serialize_move(Move move) {
     std::string notation;
-    notation.reserve(24);
+    notation.reserve(8);
     append_move(notation, move);
     return notation;
 }
