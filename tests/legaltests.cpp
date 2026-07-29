@@ -1,10 +1,13 @@
 #include "legal.h"
+#include "setup.h"
 
 #include <array>
 #include <cstddef>
+#include <cstdint>
 #include <cstdlib>
 #include <iostream>
 #include <string_view>
+#include <utility>
 
 namespace {
 
@@ -46,7 +49,10 @@ inline constexpr std::array<Square, COLOR_NB>
   const Position& left,
   const Position& right) noexcept {
     if (left.side_to_move() != right.side_to_move()
-        || left.occupied() != right.occupied())
+        || left.occupied() != right.occupied()
+        || left.key() != right.key()
+        || left.key() != left.recompute_key()
+        || right.key() != right.recompute_key())
         return false;
 
     for (int square_index = 0;
@@ -121,6 +127,22 @@ inline constexpr std::array<Square, COLOR_NB>
     return moves.size();
 }
 
+[[nodiscard]] constexpr bool move_lists_equal(
+  const MoveList& left,
+  const MoveList& right) noexcept {
+    if (left.size() != right.size())
+        return false;
+
+    for (std::size_t index = 0;
+         index < left.size();
+         ++index) {
+        if (left[index] != right[index])
+            return false;
+    }
+
+    return true;
+}
+
 constexpr void add_missing_kings(Position& position) noexcept {
     for (int color_index = 0;
          color_index < COLOR_NB;
@@ -172,7 +194,22 @@ constexpr void add_missing_kings(Position& position) noexcept {
     UndoState undo;
     do_move(position, move, undo);
     return captures_opposing_king
-        || !in_check(position, moving_color);
+        || checkers(position, moving_color).empty();
+}
+
+constexpr void reference_generate_legal_moves(
+  const Position& position,
+  MoveList& moves) noexcept {
+    if (!reference_complete_king_set(position))
+        return;
+
+    MoveList pseudo_moves;
+    generate_moves(position, pseudo_moves);
+
+    for (const Move move : pseudo_moves) {
+        if (reference_legal_on_copy(position, move))
+            moves.push_back(move);
+    }
 }
 
 [[nodiscard]] bool filter_matches_copy_oracle(
@@ -308,6 +345,75 @@ constexpr void add_missing_kings(Position& position) noexcept {
     return Move::none();
 }
 
+struct FrontierStats {
+    std::uint64_t positions = 0;
+    std::uint64_t candidates = 0;
+    std::uint64_t accepted_without_transition = 0;
+    std::uint64_t transition_candidates = 0;
+};
+
+// Recursion follows the oracle list, so an optimized-list omission cannot
+// remove the descendant positions from the comparison.
+[[nodiscard]] bool compare_oracle_frontier(
+  Position& position,
+  int remaining_depth,
+  FrontierStats& stats) {
+    ++stats.positions;
+    const Position original = position;
+
+    MoveList expected;
+    reference_generate_legal_moves(position, expected);
+
+    MoveList actual;
+    generate_legal_moves(position, actual);
+    if (!move_lists_equal(actual, expected)
+        || !positions_equal(position, original))
+        return false;
+
+    const bool expected_has_move = !expected.empty();
+    if (has_legal_move(position) != expected_has_move
+        || !positions_equal(position, original))
+        return false;
+
+    if (reference_complete_king_set(position)) {
+        const Detail::LegalMoveContext context =
+          Detail::make_legal_move_context(position);
+        MoveList pseudo_moves;
+        generate_moves(position, pseudo_moves);
+        stats.candidates += pseudo_moves.size();
+
+        for (const Move move : pseudo_moves) {
+            if (Detail::captures_opposing_king(
+                  position,
+                  move,
+                  position.side_to_move())
+                || Detail::can_accept_without_transition(
+                  position, move, context))
+                ++stats.accepted_without_transition;
+            else
+                ++stats.transition_candidates;
+        }
+    }
+
+    if (remaining_depth == 0)
+        return true;
+
+    for (const Move move : expected) {
+        UndoState undo;
+        do_move(position, move, undo);
+        const bool child_matches =
+          compare_oracle_frontier(
+            position, remaining_depth - 1, stats);
+        undo_move(position, move, undo);
+
+        if (!positions_equal(position, original)
+            || !child_matches)
+            return false;
+    }
+
+    return true;
+}
+
 void expect_move_legality(
   Position& position,
   Move move,
@@ -337,6 +443,100 @@ void expect_move_legality(
     add_missing_kings(position);
     position.put_piece(
       R_KNIGHT, make_square(FILE_F, RANK_6));
+    return position;
+}
+
+[[nodiscard]] constexpr Direction ray_offset(
+  RayDirection direction) noexcept {
+    return Detail::RAY_OFFSETS[
+      std::to_underlying(direction)];
+}
+
+[[nodiscard]] constexpr Square advance_on_ray(
+  Square square,
+  RayDirection direction,
+  int distance) noexcept {
+    for (int step = 0; step < distance; ++step)
+        square = square + ray_offset(direction);
+
+    return square;
+}
+
+[[nodiscard]] constexpr bool is_orthogonal(
+  RayDirection direction) noexcept {
+    return direction == RayDirection::NORTH
+        || direction == RayDirection::EAST
+        || direction == RayDirection::SOUTH
+        || direction == RayDirection::WEST;
+}
+
+[[nodiscard]] constexpr Position ray_blocker_position(
+  RayDirection direction,
+  Color slider_color,
+  PieceType slider_type,
+  bool add_second_blocker = false,
+  Color second_color = RED,
+  Color first_color = RED) noexcept {
+    constexpr Square king =
+      make_square(FILE_H, RANK_8);
+
+    Position position;
+    position.set_side_to_move(RED);
+    position.put_piece(R_KING, king);
+    position.put_piece(
+      B_KING, make_square(FILE_A, RANK_7));
+    position.put_piece(
+      Y_KING, make_square(FILE_G, RANK_14));
+    position.put_piece(
+      G_KING, make_square(FILE_N, RANK_8));
+    position.put_piece(
+      make_piece(first_color, KNIGHT),
+      advance_on_ray(king, direction, 1));
+
+    if (add_second_blocker) {
+        position.put_piece(
+          make_piece(second_color, PAWN),
+          advance_on_ray(king, direction, 2));
+    }
+
+    position.put_piece(
+      make_piece(slider_color, slider_type),
+      advance_on_ray(king, direction, 3));
+    return position;
+}
+
+[[nodiscard]] constexpr Position mixed_special_position() noexcept {
+    Position position;
+    position.set_side_to_move(RED);
+    position.put_piece(
+      R_KING, make_square(FILE_H, RANK_1));
+    position.put_piece(
+      B_KING, make_square(FILE_A, RANK_7));
+    position.put_piece(
+      Y_KING, make_square(FILE_G, RANK_14));
+    position.put_piece(
+      G_KING, make_square(FILE_N, RANK_8));
+
+    position.put_piece(
+      R_ROOK, make_square(FILE_D, RANK_1));
+    position.put_piece(
+      R_ROOK, make_square(FILE_K, RANK_1));
+    position.set_castling_right(
+      RED, CastlingSide::KING_SIDE);
+    position.set_castling_right(
+      RED, CastlingSide::QUEEN_SIDE);
+
+    position.put_piece(
+      R_PAWN, make_square(FILE_D, RANK_5));
+    position.put_piece(
+      B_PAWN, make_square(FILE_D, RANK_6));
+    position.set_en_passant_square(
+      BLUE, make_square(FILE_C, RANK_6));
+
+    position.put_piece(
+      R_PAWN, make_square(FILE_B, RANK_10));
+    position.put_piece(
+      G_ROOK, make_square(FILE_C, RANK_11));
     return position;
 }
 
@@ -552,6 +752,223 @@ void expect_move_legality(
 }
 
 static_assert(constexpr_legal_case());
+
+void test_slider_blocker_detection() {
+    constexpr Square king =
+      make_square(FILE_H, RANK_8);
+
+    bool compatible_rays = true;
+    bool incompatible_rays = true;
+    bool teammate_cases = true;
+    bool multiple_blockers = true;
+
+    for (std::size_t direction_index = 0;
+         direction_index < RAY_DIRECTION_NB;
+         ++direction_index) {
+        const RayDirection direction =
+          static_cast<RayDirection>(direction_index);
+        const Square candidate =
+          advance_on_ray(king, direction, 1);
+        const PieceType compatible =
+          is_orthogonal(direction) ? ROOK : BISHOP;
+        const PieceType incompatible =
+          is_orthogonal(direction) ? BISHOP : ROOK;
+
+        for (const Color opponent : {BLUE, GREEN}) {
+            for (const PieceType slider :
+                 {compatible, QUEEN}) {
+                Position position =
+                  ray_blocker_position(
+                    direction, opponent, slider);
+                Color moving_color = RED;
+                Square rotated_candidate = candidate;
+
+                for (int rotation = 0;
+                     rotation < COLOR_NB;
+                     ++rotation) {
+                    compatible_rays &=
+                      !in_check(
+                        position, moving_color)
+                      && slider_blockers_to_king(
+                           position, moving_color)
+                           == Bitboard::from_square(
+                                rotated_candidate);
+                    position =
+                      rotate_clockwise(position);
+                    moving_color =
+                      next_color(moving_color);
+                    rotated_candidate =
+                      rotate_clockwise(
+                        rotated_candidate);
+                }
+            }
+
+            const Position wrong_slider =
+              ray_blocker_position(
+                direction, opponent, incompatible);
+            incompatible_rays &=
+              slider_blockers_to_king(
+                wrong_slider, RED)
+                .empty();
+        }
+
+        const Position teammate_slider =
+          ray_blocker_position(
+            direction, YELLOW, QUEEN);
+        const Position teammate_first =
+          ray_blocker_position(
+            direction,
+            BLUE,
+            QUEEN,
+            false,
+            RED,
+            YELLOW);
+        teammate_cases &=
+          slider_blockers_to_king(
+            teammate_slider, RED)
+              .empty()
+          && slider_blockers_to_king(
+               teammate_first, RED)
+               .empty();
+
+        for (const Color second_color :
+             {RED, YELLOW, BLUE}) {
+            const Position two_blockers =
+              ray_blocker_position(
+                direction,
+                GREEN,
+                QUEEN,
+                true,
+                second_color);
+            multiple_blockers &=
+              slider_blockers_to_king(
+                two_blockers, RED)
+                .empty();
+        }
+    }
+
+    expect(
+      compatible_rays,
+      "all compatible opposing slider rays identify their sole blocker");
+    expect(
+      incompatible_rays,
+      "incompatible slider types do not create king-ray blockers");
+    expect(
+      teammate_cases,
+      "teammate pieces and sliders do not create mover-king pins");
+    expect(
+      multiple_blockers,
+      "a ray with two intervening pieces has no sole blocker");
+}
+
+void test_fast_path_classification() {
+    Position unpinned = terminal_base();
+    const Move knight_move = Move::normal(
+      make_square(FILE_F, RANK_6),
+      make_square(FILE_G, RANK_8));
+    const Detail::LegalMoveContext unpinned_context =
+      Detail::make_legal_move_context(unpinned);
+    expect(
+      Detail::can_accept_without_transition(
+        unpinned, knight_move, unpinned_context),
+      "an unpinned non-king move outside check uses the fast path");
+
+    Position pinned = pin_position();
+    const Detail::LegalMoveContext pinned_context =
+      Detail::make_legal_move_context(pinned);
+    expect(
+      pinned_context.slider_blockers
+        == Bitboard::from_square(
+             make_square(FILE_H, RANK_7)),
+      "the legality context records the pinned rook");
+    expect(
+      !Detail::can_accept_without_transition(
+        pinned,
+        Move::normal(
+          make_square(FILE_H, RANK_7),
+          make_square(FILE_I, RANK_7)),
+        pinned_context)
+        && !Detail::can_accept_without_transition(
+          pinned,
+          Move::normal(
+            make_square(FILE_H, RANK_7),
+            make_square(FILE_H, RANK_8)),
+          pinned_context),
+      "all moves by a slider blocker use the transition test");
+
+    Position checked = single_check_position();
+    const Detail::LegalMoveContext checked_context =
+      Detail::make_legal_move_context(checked);
+    expect(
+      checked_context.checked
+        && !Detail::can_accept_without_transition(
+          checked,
+          Move::normal(
+            make_square(FILE_F, RANK_7),
+            make_square(FILE_H, RANK_7)),
+          checked_context),
+      "every nonterminal check evasion uses the transition test");
+
+    Position king_position = terminal_base();
+    const Detail::LegalMoveContext king_context =
+      Detail::make_legal_move_context(king_position);
+    expect(
+      !Detail::can_accept_without_transition(
+        king_position,
+        Move::normal(
+          make_square(FILE_H, RANK_5),
+          make_square(FILE_G, RANK_5)),
+        king_context),
+      "ordinary king moves use the transition test");
+
+    Position en_passant =
+      en_passant_xray_position();
+    const Detail::LegalMoveContext en_passant_context =
+      Detail::make_legal_move_context(en_passant);
+    expect(
+      !Detail::can_accept_without_transition(
+        en_passant,
+        Move::en_passant(
+          make_square(FILE_D, RANK_5),
+          make_square(FILE_C, RANK_6)),
+        en_passant_context),
+      "en-passant moves use the transition test");
+
+    Position castling = castling_position();
+    const Detail::LegalMoveContext castling_context =
+      Detail::make_legal_move_context(castling);
+    const CastlingGeometry& geometry =
+      castling_geometry(
+        RED, CastlingSide::KING_SIDE);
+    expect(
+      Detail::can_accept_without_transition(
+        castling,
+        Move::castling(
+          geometry.king_source,
+          geometry.king_destination),
+        castling_context),
+      "generated castling uses its completed king-path validation");
+
+    Position promotions = mixed_special_position();
+    const Detail::LegalMoveContext promotion_context =
+      Detail::make_legal_move_context(promotions);
+    expect(
+      Detail::can_accept_without_transition(
+        promotions,
+        Move::promotion(
+          make_square(FILE_B, RANK_10),
+          make_square(FILE_B, RANK_11),
+          QUEEN),
+        promotion_context)
+        && Detail::can_accept_without_transition(
+          promotions,
+          Move::promotion(
+            make_square(FILE_B, RANK_10),
+            make_square(FILE_C, RANK_11),
+            QUEEN),
+          promotion_context),
+      "safe quiet and capture promotions use the fast path");
+}
 
 void test_terminal_king_sets() {
     const Position base = terminal_base();
@@ -1078,20 +1495,62 @@ void test_filter_oracle_fixtures() {
 
     bool passed = true;
     for (Position position : fixtures) {
-        if (!filter_matches_copy_oracle(position))
-            passed = false;
+        for (int rotation = 0;
+             rotation < COLOR_NB;
+             ++rotation) {
+            if (!filter_matches_copy_oracle(position))
+                passed = false;
+            position = rotate_clockwise(position);
+        }
     }
 
     expect(
       passed,
-      "every targeted fixture preserves pseudo order and complete position state");
+      "all rotations of every targeted fixture match the transition oracle");
+}
+
+void test_oracle_reachable_frontiers() {
+    Position starting = make_starting_position();
+    FrontierStats starting_stats;
+    const bool starting_matches =
+      compare_oracle_frontier(
+        starting, 4, starting_stats);
+
+    expect(
+      starting_matches,
+      "the starting-position depth-four frontier matches the transition oracle");
+    expect(
+      starting_stats.positions == 160266,
+      "the starting frontier compares every position through depth four");
+
+    Position special = mixed_special_position();
+    FrontierStats special_stats;
+    bool special_matches = true;
+    for (int rotation = 0;
+         rotation < COLOR_NB;
+         ++rotation) {
+        special_matches &=
+          compare_oracle_frontier(
+            special, 3, special_stats);
+        special = rotate_clockwise(special);
+    }
+
+    expect(
+      special_matches,
+      "all rotated special-move frontiers match the transition oracle");
+    expect(
+      starting_stats.accepted_without_transition > 0
+        && special_stats.accepted_without_transition > 0
+        && special_stats.transition_candidates > 0,
+      "frontier comparisons exercise both legality paths");
 }
 
 void test_exact_remaining_capacity() {
     Position position = terminal_base();
     const Position original = position;
     MoveList expected;
-    generate_legal_moves(position, expected);
+    reference_generate_legal_moves(
+      position, expected);
 
     expect(
       !expected.empty()
@@ -1140,6 +1599,8 @@ void test_exact_remaining_capacity() {
 }  // namespace
 
 int main() {
+    test_slider_blocker_detection();
+    test_fast_path_classification();
     test_terminal_king_sets();
     test_pins_and_rotation();
     test_check_evasions();
@@ -1151,6 +1612,7 @@ int main() {
     test_promotion_legality_and_order();
     test_castling_and_rotation();
     test_filter_oracle_fixtures();
+    test_oracle_reachable_frontiers();
     test_exact_remaining_capacity();
 
     if (failures != 0) {

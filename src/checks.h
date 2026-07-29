@@ -1,6 +1,9 @@
 #pragma once
 
+#include <array>
 #include <cassert>
+#include <cstddef>
+#include <utility>
 
 #include "attacks.h"
 #include "position.h"
@@ -29,6 +32,55 @@ namespace Detail {
 [[nodiscard]] constexpr Team opposing_team(Team team) noexcept {
     assert(is_ok(team));
     return team == RED_YELLOW ? BLUE_GREEN : RED_YELLOW;
+}
+
+// Returns the first occupied square from source in direction. Ray ordering is
+// selected from the sign of its mailbox offset.
+// Preconditions: direction is valid and source is in the mailbox index range.
+[[nodiscard]] constexpr Square first_occupied_on_ray(
+  RayDirection direction,
+  Square source,
+  const Bitboard& occupied) noexcept {
+    assert(is_ok(direction));
+    assert(static_cast<unsigned>(source) < SQUARE_NB);
+
+    const Bitboard occupied_on_ray =
+      ray_attacks(direction, source) & occupied;
+    if (occupied_on_ray.empty())
+        return SQ_NONE;
+
+    const Direction offset =
+      RAY_OFFSETS[std::to_underlying(direction)];
+    return int(offset) > 0
+      ? occupied_on_ray.lsb()
+      : occupied_on_ray.msb();
+}
+
+// Adds moving-color pieces that are the sole occupied square between the king
+// and an opposing compatible slider in one of the supplied directions.
+template<std::size_t DirectionCount>
+constexpr void add_slider_blockers(
+  Square king,
+  const Bitboard& occupied,
+  const Bitboard& moving_pieces,
+  const std::array<RayDirection, DirectionCount>& directions,
+  const Bitboard& opposing_sliders,
+  Bitboard& blockers) noexcept {
+    for (const RayDirection direction : directions) {
+        const Square candidate =
+          first_occupied_on_ray(
+            direction, king, occupied);
+        if (candidate == SQ_NONE
+            || !moving_pieces.test(candidate))
+            continue;
+
+        const Square pinner =
+          first_occupied_on_ray(
+            direction, candidate, occupied);
+        if (pinner != SQ_NONE
+            && opposing_sliders.test(pinner))
+            blockers.set(candidate);
+    }
 }
 
 }  // namespace Detail
@@ -141,6 +193,51 @@ namespace Detail {
       position, square, attacking_team, position.occupied());
 }
 
+// Returns moving-color pieces that are the sole occupied square between that
+// color's king and an opposing rook, bishop, or queen. A position without
+// exactly one king of color has no unique king ray and returns an empty set.
+// Precondition: color is valid.
+[[nodiscard]] constexpr Bitboard slider_blockers_to_king(
+  const Position& position, Color color) noexcept {
+    assert(is_ok(color));
+
+    const Bitboard kings = position.pieces(color, KING);
+    if (kings.popcount() != 1)
+        return {};
+
+    const Bitboard occupied = position.occupied();
+    const Bitboard moving_pieces =
+      position.pieces(color);
+    const Team opponents =
+      Detail::opposing_team(team_of(color));
+    const Bitboard opposing_pieces =
+      position.pieces(opponents);
+    const Bitboard opposing_rooks_queens =
+      opposing_pieces
+      & (position.pieces(ROOK) | position.pieces(QUEEN));
+    const Bitboard opposing_bishops_queens =
+      opposing_pieces
+      & (position.pieces(BISHOP) | position.pieces(QUEEN));
+
+    Bitboard blockers;
+    const Square king = kings.lsb();
+    Detail::add_slider_blockers(
+      king,
+      occupied,
+      moving_pieces,
+      Detail::ROOK_DIRECTIONS,
+      opposing_rooks_queens,
+      blockers);
+    Detail::add_slider_blockers(
+      king,
+      occupied,
+      moving_pieces,
+      Detail::BISHOP_DIRECTIONS,
+      opposing_bishops_queens,
+      blockers);
+    return blockers;
+}
+
 // Returns the opposing pieces that attack color's king in the current
 // position. If the position does not contain exactly one king of that color,
 // there is no unique check target and the result is empty.
@@ -164,7 +261,17 @@ namespace Detail {
 // Precondition: color is valid.
 [[nodiscard]] constexpr bool in_check(
   const Position& position, Color color) noexcept {
-    return bool(checkers(position, color));
+    assert(is_ok(color));
+
+    const Bitboard kings = position.pieces(color, KING);
+    if (kings.popcount() != 1)
+        return false;
+
+    return is_square_attacked_by_team(
+      position,
+      kings.lsb(),
+      Detail::opposing_team(team_of(color)),
+      position.occupied());
 }
 
 // Evaluates the king belonging to position.side_to_move(). A side without
