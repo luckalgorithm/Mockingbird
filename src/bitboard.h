@@ -93,6 +93,69 @@ class Bitboard {
         return SQ_NONE;
     }
 
+    // Returns the bits set in both bitboards within one limb.
+    // Precondition: index is in the range 0..LIMB_NB-1.
+    [[nodiscard]] constexpr std::uint64_t intersection_limb(
+      const Bitboard& other, std::size_t index) const noexcept {
+        assert(index < LIMB_NB);
+        return limbs_[index] & other.limbs_[index];
+    }
+
+    // Returns the least-significant square contained in both bitboards, or
+    // SQ_NONE when the intersection is empty.
+    [[nodiscard]] constexpr Square lsb_intersection(
+      const Bitboard& other) const noexcept {
+        const std::uint64_t limb0 = limbs_[0] & other.limbs_[0];
+        const std::uint64_t limb1 = limbs_[1] & other.limbs_[1];
+        const std::uint64_t limb2 = limbs_[2] & other.limbs_[2];
+        const std::uint64_t limb3 = limbs_[3] & other.limbs_[3];
+        const std::uint64_t low_half = limb0 | limb1;
+        const std::uint64_t high_half = limb2 | limb3;
+
+        if ((low_half | high_half) == 0)
+            return SQ_NONE;
+
+        if (low_half != 0) {
+            if (limb0 != 0)
+                return Square(std::countr_zero(limb0));
+            return Square(int(BITS_PER_LIMB) + std::countr_zero(limb1));
+        }
+
+        if (limb2 != 0)
+            return Square(2 * int(BITS_PER_LIMB) + std::countr_zero(limb2));
+        return Square(3 * int(BITS_PER_LIMB) + std::countr_zero(limb3));
+    }
+
+    // Returns the most-significant square contained in both bitboards, or
+    // SQ_NONE when the intersection is empty.
+    [[nodiscard]] constexpr Square msb_intersection(
+      const Bitboard& other) const noexcept {
+        const std::uint64_t limb0 = limbs_[0] & other.limbs_[0];
+        const std::uint64_t limb1 = limbs_[1] & other.limbs_[1];
+        const std::uint64_t limb2 = limbs_[2] & other.limbs_[2];
+        const std::uint64_t limb3 = limbs_[3] & other.limbs_[3];
+        const std::uint64_t low_half = limb0 | limb1;
+        const std::uint64_t high_half = limb2 | limb3;
+
+        if ((low_half | high_half) == 0)
+            return SQ_NONE;
+
+        if (high_half != 0) {
+            if (limb3 != 0) {
+                return Square(
+                  4 * int(BITS_PER_LIMB) - 1 - std::countl_zero(limb3));
+            }
+            return Square(
+              3 * int(BITS_PER_LIMB) - 1 - std::countl_zero(limb2));
+        }
+
+        if (limb1 != 0) {
+            return Square(
+              2 * int(BITS_PER_LIMB) - 1 - std::countl_zero(limb1));
+        }
+        return Square(int(BITS_PER_LIMB) - 1 - std::countl_zero(limb0));
+    }
+
     // Clears and returns the least-significant set bit.
     // Precondition: the bitboard is not empty.
     constexpr Square pop_lsb() noexcept {

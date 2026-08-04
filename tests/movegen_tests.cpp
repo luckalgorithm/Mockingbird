@@ -169,6 +169,27 @@ static_assert(constexpr_all_move_generation());
     return true;
 }
 
+[[nodiscard]] constexpr bool contains_move(
+  const Mockingbird::MoveList& moves,
+  Mockingbird::Move expected) noexcept {
+    for (const Mockingbird::Move move : moves) {
+        if (move == expected)
+            return true;
+    }
+
+    return false;
+}
+
+[[nodiscard]] constexpr bool is_tactical_subsequence_move(
+  const Mockingbird::Position& position,
+  Mockingbird::Move move) noexcept {
+    using namespace Mockingbird;
+
+    return move.type() == MoveType::EN_PASSANT
+        || move.is_promotion()
+        || !position.empty(move.to());
+}
+
 constexpr std::array<Mockingbird::PieceType, 3> SLIDER_TYPES = {
   Mockingbird::BISHOP,
   Mockingbird::ROOK,
@@ -215,7 +236,12 @@ void test_move_list() {
     MoveList moves;
     expect(moves.empty(), "default move list is empty");
     expect(moves.size() == 0, "default move list has size zero");
-    expect(moves.capacity() == 528, "move list has fixed capacity 528");
+    expect(
+      moves.capacity() == MoveList::CAPACITY,
+      "move list reports its geometric capacity");
+    expect(
+      MoveList::INLINE_CAPACITY == 96,
+      "common move lists use bounded inline storage");
 
     moves.push_back(first);
     moves.push_back(second);
@@ -224,6 +250,11 @@ void test_move_list() {
     expect(moves[0] == first, "indexing returns the first move");
     expect(moves[1] == second, "indexing returns the second move");
     expect(moves.begin() + 2 == moves.end(), "iteration spans the stored moves");
+
+    moves.truncate(1);
+    expect(
+      moves.size() == 1 && moves[0] == first,
+      "truncating inline storage preserves the retained prefix");
 
     moves.clear();
     expect(moves.empty(), "clear resets the move-list size");
@@ -982,6 +1013,76 @@ void test_combined_all_move_special_pawns() {
            "non-pawn generation begins after every pawn move");
 }
 
+void test_tactical_generation_is_exact_subsequence() {
+    using namespace Mockingbird;
+
+    Position position;
+    position.put_piece(
+      R_PAWN, make_square(FILE_B, RANK_10));
+    position.put_piece(
+      G_ROOK, make_square(FILE_A, RANK_11));
+    position.put_piece(
+      B_PAWN, make_square(FILE_D, RANK_11));
+    position.set_en_passant_square(
+      BLUE, make_square(FILE_C, RANK_11));
+
+    position.put_piece(
+      R_KNIGHT, make_square(FILE_H, RANK_8));
+    position.put_piece(
+      B_BISHOP, make_square(FILE_F, RANK_7));
+    position.put_piece(
+      R_BISHOP, make_square(FILE_H, RANK_6));
+    position.put_piece(
+      G_ROOK, make_square(FILE_J, RANK_8));
+    position.put_piece(
+      R_ROOK, make_square(FILE_E, RANK_5));
+    position.put_piece(
+      B_KNIGHT, make_square(FILE_E, RANK_8));
+    position.put_piece(
+      R_QUEEN, make_square(FILE_K, RANK_5));
+    position.put_piece(
+      G_PAWN, make_square(FILE_K, RANK_7));
+    position.put_piece(
+      R_KING, make_square(FILE_H, RANK_5));
+    position.put_piece(
+      B_PAWN, make_square(FILE_I, RANK_5));
+
+    MoveList all_moves;
+    generate_moves(position, all_moves);
+    MoveList expected;
+    for (const Move move : all_moves) {
+        if (is_tactical_subsequence_move(position, move))
+            expected.push_back(move);
+    }
+
+    MoveList actual;
+    generate_tactical_moves(position, actual);
+
+    expect(
+      !actual.empty()
+        && move_lists_equal(actual, expected),
+      "tactical generation is the exact capture-and-promotion subsequence");
+    expect(
+      contains_move(
+        actual,
+        Move::promotion(
+          make_square(FILE_B, RANK_10),
+          make_square(FILE_B, RANK_11),
+          QUEEN))
+        && contains_move(
+             actual,
+             Move::en_passant(
+               make_square(FILE_B, RANK_10),
+               make_square(FILE_C, RANK_11),
+               QUEEN))
+        && contains_move(
+             actual,
+             Move::normal(
+               make_square(FILE_H, RANK_8),
+               make_square(FILE_F, RANK_7))),
+      "tactical generation includes quiet promotions, en passant, and piece captures");
+}
+
 }  // namespace
 
 int main() {
@@ -1006,6 +1107,7 @@ int main() {
     test_combined_nonpawn_filters_illegal_castling();
     test_combined_all_move_generation();
     test_combined_all_move_special_pawns();
+    test_tactical_generation_is_exact_subsequence();
 
     if (failures != 0) {
         std::cerr << failures << " move-generation test(s) failed\n";

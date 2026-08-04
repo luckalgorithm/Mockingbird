@@ -3,6 +3,7 @@
 #include <atomic>
 #include <cassert>
 #include <chrono>
+#include <concepts>
 #include <cstdint>
 #include <optional>
 #include <utility>
@@ -15,9 +16,18 @@ struct IterativeLimits {
     // Iterations search depths 1 through max_depth.
     int max_depth = 1;
     std::optional<std::uint64_t> node_limit;
+    // time_limit is the hard node-entry deadline. soft_time_limit is checked
+    // only after a completed iteration, so the last trustworthy result is
+    // retained before another iteration is started.
     std::optional<SearchDuration> time_limit;
+    std::optional<SearchDuration> soft_time_limit;
+    // A shared control supplies dormant deadlines that another thread can
+    // activate while search is running. The caller retains ownership for the
+    // complete search.
+    const SearchDetail::SearchTimeControl* time_control = nullptr;
     // The caller retains ownership of this flag for the complete search.
-    // A true value stops search at the next node-entry budget check.
+    // A true value stops search at the next sampled control check. Sampling
+    // can admit at most CONTROL_CHECK_INTERVAL - 1 additional nodes.
     const std::atomic_bool* external_stop = nullptr;
 };
 
@@ -34,6 +44,9 @@ enum class IterativeStop : std::uint8_t {
 struct CompletedIteration {
     SearchResult result;
     int depth = 0;
+    // selective_depth is the greatest entered ply across every aspiration
+    // attempt that contributed to this completed iteration.
+    int selective_depth = 0;
     // Attempts includes the initial search and every aspiration re-search at
     // this depth.
     std::uint32_t attempts = 0;
@@ -42,6 +55,17 @@ struct CompletedIteration {
       const CompletedIteration&,
       const CompletedIteration&) noexcept = default;
 };
+
+// A completion observer runs once after each exact iterative-deepening result.
+// The node count is cumulative across all completed depths and aspiration
+// attempts. The duration is measured from the beginning of the root search.
+template<typename Observer>
+concept CompletionObserver =
+  std::invocable<
+    Observer&,
+    const CompletedIteration&,
+    std::uint64_t,
+    SearchDuration>;
 
 struct IterativeResult {
     // last_completed excludes every partially searched iteration.
@@ -168,13 +192,58 @@ widen_aspiration_half_width(
       : FULL_ASPIRATION_HALF_WIDTH;
 }
 
+// A failed search proves one boundary of the next window. Retaining that
+// boundary and expanding only toward the unknown score avoids discarding the
+// useful bound supplied by the completed attempt.
+[[nodiscard]] constexpr AspirationWindow
+widen_aspiration_window(
+  AspirationWindow failed_window,
+  Score bound,
+  std::int64_t width) noexcept {
+    assert(failed_window.alpha < failed_window.beta);
+    assert(!failed_window.contains_exact(bound));
+    assert(width > 0);
+    assert(width < FULL_ASPIRATION_HALF_WIDTH);
+
+    constexpr std::int64_t minimum =
+      -std::int64_t{INFINITE_SCORE};
+    constexpr std::int64_t maximum =
+      std::int64_t{INFINITE_SCORE};
+
+    if (bound <= failed_window.alpha) {
+        const std::int64_t upper = failed_window.alpha;
+        const std::int64_t lower = upper - width;
+        return {
+          static_cast<Score>(
+            lower < minimum ? minimum : lower),
+          failed_window.alpha,
+        };
+    }
+
+    assert(bound >= failed_window.beta);
+    const std::int64_t lower = failed_window.beta;
+    const std::int64_t upper = lower + width;
+    return {
+      failed_window.beta,
+      static_cast<Score>(
+        upper > maximum ? maximum : upper),
+    };
+}
+
 [[nodiscard]] constexpr bool valid_limits(
   const IterativeLimits& limits) noexcept {
     return limits.max_depth >= 1
         && limits.max_depth <= MAX_SEARCH_DEPTH
         && (!limits.time_limit
             || *limits.time_limit
-                 >= SearchDuration::zero());
+                 >= SearchDuration::zero())
+        && (!limits.soft_time_limit
+            || *limits.soft_time_limit
+                 >= SearchDuration::zero())
+        && (!limits.time_limit
+            || !limits.soft_time_limit
+            || *limits.soft_time_limit
+                 <= *limits.time_limit);
 }
 
 [[nodiscard]] constexpr IterativeStop
@@ -203,24 +272,28 @@ iterative_stop(SearchStopReason reason) noexcept {
 // legal. After depth one, each iteration starts with an aspiration window
 // around the previous exact score. Failed searches widen that window and are
 // included in the iteration's node and attempt counts.
-// Time is checked when a node is entered, so one active node can finish after
-// the requested duration.
+// The hard time limit is checked when a node is entered, so one active node
+// can finish after that duration. The optional soft limit is checked between
+// completed iterations.
 //
 // A zero node or time limit is valid and prevents the first node from being
 // entered. When both limits stop the same node, the node limit has precedence.
 //
 // Preconditions:
 // - max_depth is in the inclusive range 1..MAX_SEARCH_DEPTH;
-// - time_limit is absent or non-negative;
+// - both time limits are absent or non-negative;
+// - soft_time_limit does not exceed time_limit when both are present;
 // - history.current_key() equals position.key();
 // - the position has a result-valid king layout.
 namespace IterationDetail {
 
+template<CompletionObserver Observer>
 [[nodiscard]] inline IterativeResult iterative_search_impl(
   Position& position,
   const PositionHistory& history,
   const IterativeLimits& limits,
-  TranspositionTable& table) {
+  TranspositionTable& table,
+  Observer&& observer) {
     const SearchClock::time_point start =
       SearchClock::now();
     IterativeResult result;
@@ -264,7 +337,10 @@ namespace IterationDetail {
     SearchDetail::SearchBudget budget{
       limits.node_limit,
       deadline,
-      limits.external_stop};
+      limits.external_stop,
+      limits.time_control};
+    // Every completed depth and aspiration attempt belongs to one root-search
+    // generation, so safe scores can be shared throughout this call.
     table.new_search();
     SearchDetail::LimitedSearchState state{
       std::move(budget),
@@ -276,6 +352,7 @@ namespace IterationDetail {
     for (int depth = 1;
          depth <= limits.max_depth;
          ++depth) {
+        state.reset_selective_depth();
         const std::uint64_t iteration_start_nodes =
           state.nodes;
         std::int64_t half_width =
@@ -333,9 +410,13 @@ namespace IterationDetail {
                   iteration->score,
                   half_width);
             window =
-              IterationDetail::make_aspiration_window(
-                  previous_score,
-                  half_width);
+              half_width
+                  == IterationDetail::FULL_ASPIRATION_HALF_WIDTH
+                ? IterationDetail::FULL_ASPIRATION_WINDOW
+                : IterationDetail::widen_aspiration_window(
+                    window,
+                    iteration->score,
+                    half_width);
         }
 
         assert(attempts > 0);
@@ -350,13 +431,40 @@ namespace IterationDetail {
                 - iteration_start_nodes,
             },
             depth,
+            state.selective_depth(),
             attempts,
           };
         result.total_nodes = state.nodes;
 
+        const SearchClock::time_point completed_at =
+          SearchClock::now();
+        observer(
+          *result.last_completed,
+          result.total_nodes,
+          completed_at - start);
+
         if (!completed.best_move.is_board_move()) {
             return finish(
               IterativeStop::TERMINAL_POSITION);
+        }
+
+        // A soft deadline never interrupts a node. It prevents a deeper
+        // iteration only after the current exact root result is available.
+        const SearchClock::time_point now =
+          SearchClock::now();
+        const bool static_soft_limit_reached =
+          limits.soft_time_limit
+          && now - start
+               >= *limits.soft_time_limit;
+        const bool activated_soft_limit_reached =
+          limits.time_control
+          && limits.time_control
+               ->soft_limit_reached(now);
+        if (depth < limits.max_depth
+            && (static_soft_limit_reached
+                || activated_soft_limit_reached)) {
+            return finish(
+              IterativeStop::TIME_LIMIT);
         }
 
         previous_best = completed.best_move;
@@ -368,15 +476,41 @@ namespace IterationDetail {
 
 }  // namespace IterationDetail
 
-// Reuses table across root searches. Entries remain qualified by their
-// position key and repetition-history context.
+// Reuses the table across root searches. Each call advances one generation;
+// current-generation scores are position-keyed, while stale scores require
+// their stored repetition-history tag.
 [[nodiscard]] inline IterativeResult iterative_search(
   Position& position,
   const PositionHistory& history,
   const IterativeLimits& limits,
   TranspositionTable& table) {
+    const auto ignore_completion =
+      [](const CompletedIteration&,
+         std::uint64_t,
+         SearchDuration) noexcept {};
     return IterationDetail::iterative_search_impl(
-      position, history, limits, table);
+      position,
+      history,
+      limits,
+      table,
+      ignore_completion);
+}
+
+// Reports each completed depth without placing protocol concerns in the
+// search core. The observer is called on the searching thread.
+template<CompletionObserver Observer>
+[[nodiscard]] inline IterativeResult iterative_search(
+  Position& position,
+  const PositionHistory& history,
+  const IterativeLimits& limits,
+  TranspositionTable& table,
+  Observer&& observer) {
+    return IterationDetail::iterative_search_impl(
+      position,
+      history,
+      limits,
+      table,
+      std::forward<Observer>(observer));
 }
 
 // Uses a new default-sized transposition table for this call.
@@ -385,7 +519,7 @@ namespace IterationDetail {
   const PositionHistory& history,
   const IterativeLimits& limits) {
     TranspositionTable table;
-    return IterationDetail::iterative_search_impl(
+    return iterative_search(
       position, history, limits, table);
 }
 
@@ -420,6 +554,15 @@ static_assert(
       .max_depth = 0,
       .node_limit = std::nullopt,
       .time_limit = std::nullopt,
+      .soft_time_limit = std::nullopt,
+    }));
+static_assert(
+  !IterationDetail::valid_limits(
+    IterativeLimits{
+      .max_depth = 1,
+      .node_limit = std::nullopt,
+      .time_limit = SearchDuration{1},
+      .soft_time_limit = SearchDuration{2},
     }));
 static_assert(
   !IterativeResult{}.has_completed_iteration());

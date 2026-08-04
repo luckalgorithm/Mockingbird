@@ -155,6 +155,62 @@ inline constexpr std::array<std::array<Bitboard, SQUARE_NB>, COLOR_NB> PAWN_ATTA
 // in one direction. The source square is not part of its ray.
 inline constexpr auto RAY_ATTACKS = Detail::make_ray_tables();
 
+namespace Detail {
+
+template<RayDirection Direction>
+[[nodiscard]] constexpr Bitboard blocked_horizontal_ray_attacks(
+  Square square, const Bitboard& occupied) noexcept {
+    static_assert(
+      Direction == RayDirection::EAST
+      || Direction == RayDirection::WEST);
+    constexpr std::size_t direction_index = std::to_underlying(Direction);
+    const Bitboard& ray = RAY_ATTACKS[direction_index][std::size_t(square)];
+    const std::size_t limb_index =
+      static_cast<unsigned>(square) / Bitboard::BITS_PER_LIMB;
+    // Four complete 16-square mailbox ranks fit in each 64-bit limb, so a
+    // horizontal ray never crosses a limb boundary.
+    const std::uint64_t blockers =
+      ray.intersection_limb(occupied, limb_index);
+
+    if (blockers == 0)
+        return ray;
+
+    int bit;
+    if constexpr (Direction == RayDirection::EAST) {
+        bit = std::countr_zero(blockers);
+    } else {
+        bit = static_cast<int>(Bitboard::BITS_PER_LIMB) - 1
+            - std::countl_zero(blockers);
+    }
+    const Square first_blocker =
+      Square(int(limb_index * Bitboard::BITS_PER_LIMB) + bit);
+    // The blocker tail excludes the blocker itself, so XOR retains every
+    // square through the first occupied square.
+    return ray ^ RAY_ATTACKS[direction_index][std::size_t(first_blocker)];
+}
+
+template<RayDirection Direction>
+[[nodiscard]] constexpr Bitboard blocked_multilimb_ray_attacks(
+  Square square, const Bitboard& occupied) noexcept {
+    static_assert(
+      Direction != RayDirection::EAST
+      && Direction != RayDirection::WEST);
+    constexpr std::size_t direction_index = std::to_underlying(Direction);
+    const Bitboard& ray = RAY_ATTACKS[direction_index][std::size_t(square)];
+    Square first_blocker;
+    if constexpr (int(RAY_OFFSETS[direction_index]) > 0)
+        first_blocker = ray.lsb_intersection(occupied);
+    else
+        first_blocker = ray.msb_intersection(occupied);
+
+    if (first_blocker == SQ_NONE)
+        return ray;
+
+    return ray ^ RAY_ATTACKS[direction_index][std::size_t(first_blocker)];
+}
+
+}  // namespace Detail
+
 // Precondition: square is in the mailbox index range 0..255.
 [[nodiscard]] constexpr const Bitboard& king_attacks(Square square) noexcept {
     assert(static_cast<unsigned>(square) < SQUARE_NB);
@@ -173,6 +229,35 @@ inline constexpr auto RAY_ATTACKS = Detail::make_ray_tables();
     assert(is_ok(color));
     assert(static_cast<unsigned>(square) < SQUARE_NB);
     return PAWN_ATTACKS[std::size_t(color)][std::size_t(square)];
+}
+
+// Returns the union of all destinations attacked from the source set by the
+// pawn geometry for color. Mailbox padding and cut-out corners are removed
+// after shifting. Every set source square must be playable.
+// Precondition: color is valid.
+[[nodiscard]] constexpr Bitboard pawn_attacks(
+  Color color, const Bitboard& sources) noexcept {
+    assert(is_ok(color));
+
+    Bitboard attacks;
+    switch (color) {
+        case RED:
+            attacks = (sources << 15) | (sources << 17);
+            break;
+        case BLUE:
+            attacks = (sources << 17) | (sources >> 15);
+            break;
+        case YELLOW:
+            attacks = (sources >> 15) | (sources >> 17);
+            break;
+        case GREEN:
+            attacks = (sources >> 17) | (sources << 15);
+            break;
+        case COLOR_NB:
+            return {};
+    }
+
+    return attacks & PLAYABLE_SQUARES;
 }
 
 // Preconditions: direction is valid and square is in the mailbox index range
@@ -198,31 +283,39 @@ inline constexpr auto RAY_ATTACKS = Detail::make_ray_tables();
 
     const Direction offset = Detail::RAY_OFFSETS[std::to_underlying(direction)];
     const Square first_blocker = int(offset) > 0 ? blockers.lsb() : blockers.msb();
-    return ray & ~ray_attacks(direction, first_blocker);
+    // The blocker tail is a subset of the source ray, so XOR removes it while
+    // retaining the first occupied square.
+    return ray ^ ray_attacks(direction, first_blocker);
 }
 
 // Occupied squares stop a ray but remain in the returned attack set.
 // Precondition: square is in the mailbox index range 0..255.
 [[nodiscard]] constexpr Bitboard rook_attacks(
-  Square square, const Bitboard& occupied = {}) noexcept {
-    Bitboard attacks;
-
-    for (const RayDirection direction : Detail::ROOK_DIRECTIONS)
-        attacks |= ray_attacks(direction, square, occupied);
-
-    return attacks;
+    Square square, const Bitboard& occupied = {}) noexcept {
+    assert(static_cast<unsigned>(square) < SQUARE_NB);
+    return Detail::blocked_multilimb_ray_attacks<RayDirection::NORTH>(
+             square, occupied)
+         | Detail::blocked_horizontal_ray_attacks<RayDirection::EAST>(
+             square, occupied)
+         | Detail::blocked_multilimb_ray_attacks<RayDirection::SOUTH>(
+             square, occupied)
+         | Detail::blocked_horizontal_ray_attacks<RayDirection::WEST>(
+             square, occupied);
 }
 
 // Occupied squares stop a ray but remain in the returned attack set.
 // Precondition: square is in the mailbox index range 0..255.
 [[nodiscard]] constexpr Bitboard bishop_attacks(
   Square square, const Bitboard& occupied = {}) noexcept {
-    Bitboard attacks;
-
-    for (const RayDirection direction : Detail::BISHOP_DIRECTIONS)
-        attacks |= ray_attacks(direction, square, occupied);
-
-    return attacks;
+    assert(static_cast<unsigned>(square) < SQUARE_NB);
+    return Detail::blocked_multilimb_ray_attacks<RayDirection::NORTH_EAST>(
+             square, occupied)
+         | Detail::blocked_multilimb_ray_attacks<RayDirection::SOUTH_EAST>(
+             square, occupied)
+         | Detail::blocked_multilimb_ray_attacks<RayDirection::SOUTH_WEST>(
+             square, occupied)
+         | Detail::blocked_multilimb_ray_attacks<RayDirection::NORTH_WEST>(
+             square, occupied);
 }
 
 // Occupied squares stop a ray but remain in the returned attack set.

@@ -40,6 +40,50 @@ void expect(bool condition, std::string_view message) {
     ++failures;
 }
 
+void test_hashfull_sampling() {
+    TranspositionTable table{1};
+    table.new_search();
+    expect(
+      table.hashfull_per_mille() == 0,
+      "an empty table reports zero current-generation occupancy");
+
+    std::array<PositionHistory, 4> histories = {
+      PositionHistory{PositionKey{1}},
+      PositionHistory{PositionKey{2}},
+      PositionHistory{PositionKey{3}},
+      PositionHistory{PositionKey{4}},
+    };
+    for (std::size_t index = 0;
+         index < histories.size();
+         ++index) {
+        const PositionKey key =
+          static_cast<PositionKey>(index + 1);
+        table.store(
+          key,
+          histories[index].context(),
+          1,
+          DRAW_SCORE,
+          TranspositionBound::EXACT,
+          Move::none());
+        expect(
+          table.hashfull_per_mille()
+            == static_cast<std::uint16_t>(
+                 (index + 1) * 250),
+          "small-table hashfull scales sampled occupancy to per-mille");
+    }
+
+    table.new_search();
+    expect(
+      table.hashfull_per_mille() == 0,
+      "a new generation excludes untouched stale entries");
+    expect(
+      table.probe(
+        PositionKey{1}, histories[0].context())
+        != nullptr
+        && table.hashfull_per_mille() == 250,
+      "a safe probe joins one stale entry to the current generation");
+}
+
 [[nodiscard]] constexpr bool positions_equal(
   const Position& left,
   const Position& right) noexcept {
@@ -229,6 +273,65 @@ static_assert(
   SearchDetail::classify_bound(
     0, -100, 100)
   == TranspositionBound::EXACT);
+static_assert(sizeof(TranspositionEntry) == 32);
+static_assert(
+  sizeof(TranspositionEntry)
+    * TranspositionTable::BUCKET_SIZE
+  == 128);
+static_assert(
+  sizeof(TranspositionEntry{}.history_tag)
+  == sizeof(std::uint32_t));
+static_assert(
+  NO_STATIC_EVALUATION
+  < -MAX_EVALUATION_SCORE);
+static_assert(
+  SearchDetail::transposition_cutoff(
+    4,
+    2,
+    TranspositionBound::EXACT,
+    Score{0},
+    Score{-1},
+    Score{1}));
+static_assert(
+  SearchDetail::transposition_cutoff(
+    4,
+    2,
+    TranspositionBound::LOWER,
+    Score{100},
+    Score{-100},
+    Score{100}));
+static_assert(
+  SearchDetail::transposition_cutoff(
+    4,
+    2,
+    TranspositionBound::UPPER,
+    Score{-100},
+    Score{-100},
+    Score{100}));
+static_assert(
+  !SearchDetail::transposition_cutoff(
+    1,
+    2,
+    TranspositionBound::EXACT,
+    Score{0},
+    Score{-1},
+    Score{1}));
+static_assert(
+  SearchDetail::transposition_cutoff(
+    0,
+    0,
+    TranspositionBound::EXACT,
+    Score{0},
+    Score{-1},
+    Score{1}));
+static_assert(
+  !SearchDetail::transposition_cutoff(
+    0,
+    1,
+    TranspositionBound::EXACT,
+    Score{0},
+    Score{-1},
+    Score{1}));
 static_assert(
   std::is_same_v<
     decltype(search(
@@ -319,6 +422,278 @@ void test_table_storage_and_collisions() {
       "clear removes every occupied entry");
 }
 
+void test_static_evaluation_cache() {
+    constexpr PositionKey key =
+      0xC4C4C4C4C4C4C4C4ULL;
+    constexpr Move move = Move::normal(
+      make_square(FILE_D, RANK_1),
+      make_square(FILE_D, RANK_2));
+    PositionHistory first_history{key};
+    PositionHistory second_history{
+      key ^ PositionKey{0x0101010101010101ULL}};
+    second_history.push(key);
+    const HistoryContext first =
+      first_history.context();
+    const HistoryContext second =
+      second_history.context();
+    TranspositionTable table{1};
+
+    expect(
+      !TranspositionEntry{}.has_static_evaluation()
+        && TranspositionEntry{}.static_evaluation
+             == NO_STATIC_EVALUATION,
+      "an empty entry has no cached static evaluation");
+
+    table.store(
+      key,
+      first,
+      8,
+      Score{80},
+      TranspositionBound::EXACT,
+      move,
+      Score{0});
+    const TranspositionEntry* cached =
+      table.find(key, first);
+    expect(
+      cached
+        && cached->has_static_evaluation()
+        && cached->static_evaluation == Score{0},
+      "zero is retained as a present static evaluation");
+
+    table.store(
+      key,
+      first,
+      4,
+      Score{40},
+      TranspositionBound::LOWER,
+      move);
+    cached = table.find(key, first);
+    expect(
+      cached
+        && cached->depth == 8
+        && cached->score == Score{80}
+        && cached->static_evaluation == Score{0},
+      "retaining a deeper same-key entry preserves its static evaluation");
+
+    table.store(
+      key,
+      first,
+      4,
+      Score{40},
+      TranspositionBound::LOWER,
+      move,
+      Score{125});
+    cached = table.find(key, first);
+    expect(
+      cached
+        && cached->depth == 8
+        && cached->score == Score{80}
+        && cached->static_evaluation == Score{125},
+      "a retained same-key entry accepts a supplied static evaluation");
+
+    table.new_search();
+    table.store(
+      key,
+      second,
+      1,
+      Score{10},
+      TranspositionBound::EXACT,
+      move);
+    cached = table.find(key, second);
+    expect(
+      cached
+        && table.find(key, first) == nullptr
+        && cached->depth == 1
+        && cached->score == Score{10}
+        && cached->static_evaluation == Score{125},
+      "same-key score replacement updates history while preserving position evaluation");
+
+    table.new_search();
+    expect(
+      table.probe(key, first) == nullptr
+        && table.find(key)
+        && table.find(key)->has_static_evaluation()
+        && table.find(key)->static_evaluation
+             == Score{125},
+      "a stale history mismatch rejects the score without discarding position evaluation");
+
+    table.clear();
+    table.store(
+      key,
+      second,
+      7,
+      Score{70},
+      TranspositionBound::EXACT,
+      move);
+    table.store_quiescence(
+      key,
+      second,
+      Score{11},
+      TranspositionBound::EXACT,
+      Move::none(),
+      true,
+      Score{-42});
+    cached = table.find(key, second);
+    expect(
+      cached
+        && cached->depth == 7
+        && cached->score == Score{70}
+        && cached->static_evaluation == Score{-42},
+      "a protected main-search entry accepts quiescence static evaluation");
+
+    table.clear();
+    table.store_quiescence(
+      key,
+      first,
+      Score{9},
+      TranspositionBound::EXACT,
+      Move::none(),
+      true,
+      Score{99});
+    table.store(
+      key,
+      first,
+      1,
+      Score{19},
+      TranspositionBound::EXACT,
+      move);
+    cached = table.find(key, first);
+    expect(
+      cached
+        && cached->depth == 1
+        && cached->score == Score{19}
+        && cached->static_evaluation == Score{99},
+      "main-search promotion preserves a quiescence static evaluation");
+}
+
+void test_quiescence_storage_protection() {
+    constexpr Move move = Move::normal(
+      make_square(FILE_D, RANK_1),
+      make_square(FILE_D, RANK_2));
+    PositionHistory history{0xB5B5B5B5B5B5B5B5ULL};
+    const HistoryContext context = history.context();
+    TranspositionTable table{1};
+
+    for (PositionKey key = 0; key < 4; ++key) {
+        table.store(
+          key,
+          context,
+          static_cast<int>(key + 1),
+          static_cast<Score>(key),
+          TranspositionBound::EXACT,
+          move);
+    }
+    table.store_quiescence(
+      4,
+      context,
+      Score{40},
+      TranspositionBound::EXACT,
+      Move::none(),
+      true);
+    expect(
+      !table.find(4, context)
+        && table.find(0, context)
+        && table.find(1, context)
+        && table.find(2, context)
+        && table.find(3, context),
+      "a quiescence collision cannot evict any positive-depth entry");
+
+    table.clear();
+    for (PositionKey key = 0; key < 3; ++key) {
+        table.store(
+          key,
+          context,
+          static_cast<int>(key + 1),
+          static_cast<Score>(key),
+          TranspositionBound::EXACT,
+          move);
+    }
+    table.store_quiescence(
+      3,
+      context,
+      Score{30},
+      TranspositionBound::LOWER,
+      move,
+      false);
+    table.store_quiescence(
+      4,
+      context,
+      Score{40},
+      TranspositionBound::EXACT,
+      Move::none(),
+      true);
+    const TranspositionEntry* replacement =
+      table.find(4, context);
+    expect(
+      !table.find(3, context)
+        && replacement
+        && replacement->depth == 0
+        && replacement->score == 40
+        && replacement->stand_pat
+        && replacement->best_move.is_none()
+        && table.find(0, context)
+        && table.find(1, context)
+        && table.find(2, context),
+      "a full mixed bucket replaces only another quiescence entry");
+
+    constexpr PositionKey shared_key =
+      0xC6C6C6C6C6C6C6C6ULL;
+    table.clear();
+    table.store(
+      shared_key,
+      context,
+      7,
+      Score{70},
+      TranspositionBound::EXACT,
+      move);
+    const std::uint32_t deep_generation =
+      table.generation();
+    table.new_search();
+    table.store_quiescence(
+      shared_key,
+      context,
+      Score{0},
+      TranspositionBound::EXACT,
+      Move::none(),
+      true);
+    const TranspositionEntry* retained =
+      table.find(shared_key, context);
+    expect(
+      retained
+        && retained->depth == 7
+        && retained->score == 70
+        && retained->best_move == move
+        && !retained->stand_pat
+        && retained->generation
+             == deep_generation,
+      "a same-position quiescence store leaves deeper data unchanged");
+
+    table.clear();
+    table.store_quiescence(
+      shared_key,
+      context,
+      Score{0},
+      TranspositionBound::EXACT,
+      Move::none(),
+      true);
+    table.store(
+      shared_key,
+      context,
+      1,
+      Score{10},
+      TranspositionBound::EXACT,
+      move);
+    const TranspositionEntry* promoted =
+      table.find(shared_key, context);
+    expect(
+      promoted
+        && promoted->depth == 1
+        && promoted->score == 10
+        && promoted->best_move == move
+        && !promoted->stand_pat,
+      "a completed main search replaces same-position quiescence data");
+}
+
 void test_identity_replacement_and_move_hints() {
     constexpr PositionKey key =
       0x123456789ABCDEF0ULL;
@@ -387,19 +762,20 @@ void test_identity_replacement_and_move_hints() {
       TranspositionBound::EXACT,
       shallow_move);
     expect(
-      table.find(key, first)
+      table.find(key, first) == nullptr
         && table.find(key, second)
+        && table.find(key)->depth == 9
         && table.find(
              key ^ PositionKey{1},
              first)
              == nullptr,
-      "history contexts and full position keys are checked independently");
+      "a deeper same-position store replaces the earlier history tag");
     expect(
       table.best_move(key, first)
-          == deep_move
+          == shallow_move
         && table.best_move(key, second)
              == shallow_move,
-      "an exact history match supplies its own stored move");
+      "move hints are shared by position independently of history");
 
     PositionHistory third_history{
       key ^ PositionKey{2}};
@@ -415,15 +791,27 @@ void test_identity_replacement_and_move_hints() {
     const std::uint32_t preceding_generation =
       table.generation();
     table.new_search();
-    const TranspositionEntry* refreshed =
+    const TranspositionEntry* rejected =
       table.probe(key, first);
     expect(
-      refreshed
+      rejected == nullptr
         && table.generation()
              == preceding_generation + 1
+        && table.find(key)->generation
+             == preceding_generation,
+      "a stale score with a different history tag is rejected without refresh");
+
+    const TranspositionEntry* refreshed =
+      table.probe(key, second);
+    expect(
+      refreshed
         && refreshed->generation
              == table.generation(),
-      "a successful probe refreshes the entry generation");
+      "a stale score with its original history tag refreshes its generation");
+
+    expect(
+      table.probe(key, first) == refreshed,
+      "a current-generation score is reusable from another unrepeated path");
 }
 
 void test_generation_replacement_and_hints() {
@@ -518,6 +906,9 @@ void test_bound_storage_and_cutoffs() {
     const Position original = position;
     const std::array keys = {position.key()};
     PositionHistory history = make_history(keys);
+    const SearchResult reference =
+      search(position, history, 1);
+    const Score exact_score = reference.score;
 
     struct BoundCase {
         Score alpha;
@@ -525,15 +916,16 @@ void test_bound_storage_and_cutoffs() {
         TranspositionBound expected;
     };
 
-    constexpr std::array cases = {
+    const std::array cases = {
       BoundCase{
-        -100, 100,
+        exact_score - Score{100}, exact_score,
         TranspositionBound::LOWER},
       BoundCase{
-        600, 700,
+        exact_score, exact_score + Score{100},
         TranspositionBound::UPPER},
       BoundCase{
-        400, 600,
+        exact_score - Score{100},
+        exact_score + Score{100},
         TranspositionBound::EXACT},
     };
 
@@ -553,10 +945,10 @@ void test_bound_storage_and_cutoffs() {
             history.context());
 
         expect(
-          searched.result.score == ROOK_VALUE
+          searched.result.score == exact_score
             && entry
             && entry->depth == 1
-            && entry->score == ROOK_VALUE
+            && entry->score == exact_score
             && entry->bound == test.expected,
           "search stores bounds against the caller's original window");
     }
@@ -575,7 +967,7 @@ void test_bound_storage_and_cutoffs() {
         table.store(
           position.key(),
           history.context(),
-          1,
+          2,
           100,
           TranspositionBound::LOWER,
           legal_hint);
@@ -592,7 +984,7 @@ void test_bound_storage_and_cutoffs() {
             && cutoff.result.score == 100
             && cutoff.result.best_move
                  == legal_hint,
-          "a matching lower bound cuts off at beta");
+          "a deeper lower bound cuts off at beta");
     }
 
     {
@@ -600,7 +992,7 @@ void test_bound_storage_and_cutoffs() {
         table.store(
           position.key(),
           history.context(),
-          1,
+          2,
           -100,
           TranspositionBound::UPPER,
           legal_hint);
@@ -615,7 +1007,7 @@ void test_bound_storage_and_cutoffs() {
         expect(
           cutoff.nodes == 1
             && cutoff.result.score == -100,
-          "a matching upper bound cuts off at alpha");
+          "a deeper upper bound cuts off at alpha");
     }
 
     {
@@ -638,7 +1030,7 @@ void test_bound_storage_and_cutoffs() {
         expect(
           searched.nodes > 1
             && searched.result.score
-                 == ROOK_VALUE,
+                 == exact_score,
           "a lower bound below beta does not cut off");
     }
 
@@ -662,7 +1054,7 @@ void test_bound_storage_and_cutoffs() {
         expect(
           searched.nodes > 1
             && searched.result.score
-                 == ROOK_VALUE,
+                 == exact_score,
           "an upper bound above alpha does not cut off");
     }
 
@@ -684,10 +1076,10 @@ void test_bound_storage_and_cutoffs() {
             INFINITE_SCORE,
             table);
         expect(
-          searched.nodes > 1
-            && searched.result.score
-                 == ROOK_VALUE,
-          "an entry from another nominal depth supplies no score");
+          searched.nodes == 1
+            && searched.result.score == Score{1234}
+            && searched.result.best_move == legal_hint,
+          "a deeper exact entry satisfies a shallower request");
     }
 
     expect(
@@ -873,6 +1265,210 @@ void test_invalid_cached_move_is_ignored() {
       positions_equal(position, original)
         && history_matches(history, keys),
       "rejecting an invalid cached move preserves position and history");
+
+    TranspositionTable quiescence_table;
+    quiescence_table.store_quiescence(
+      position.key(),
+      history.context(),
+      Score{1234},
+      TranspositionBound::EXACT,
+      invalid,
+      false);
+    const SearchResult quiescence_hint =
+      search(
+        position,
+        history,
+        1,
+        quiescence_table);
+    expect(
+      quiescence_hint.best_move
+          == reference.best_move
+        && quiescence_hint.score
+             == reference.score
+        && quiescence_hint.nodes
+             == reference.nodes,
+      "a depth-zero entry neither cuts main search nor supplies an illegal hint");
+}
+
+void test_generation_score_eligibility() {
+    Position position = material_tactic_position();
+    const Position original = position;
+    const PositionKey root_key = position.key();
+    PositionHistory first{root_key};
+    PositionHistory alternate{
+      root_key ^ PositionKey{0x1111111111111111ULL}};
+    alternate.push(root_key);
+    TranspositionTable table;
+
+    const auto direct_search =
+      [&](const PositionHistory& source) {
+          PositionHistory working{source};
+          SearchDetail::SearchState state{
+            SearchDetail::UnlimitedBudget{},
+            &table};
+          const auto searched =
+            SearchDetail::alpha_beta(
+              position,
+              working,
+              1,
+              0,
+              -INFINITE_SCORE,
+              INFINITE_SCORE,
+              state);
+          assert(searched.has_value());
+          return WindowResult{
+            searched ? *searched
+                     : SearchDetail::NodeResult{},
+            state.nodes,
+          };
+      };
+
+    table.new_search();
+    const WindowResult cold = direct_search(first);
+    const WindowResult same_generation =
+      direct_search(alternate);
+    expect(
+      cold.nodes > 1
+        && same_generation.nodes == 1
+        && same_generation.result.score
+             == cold.result.score,
+      "one root-search generation reuses a position score across unrepeated paths");
+
+    table.new_search();
+    const WindowResult stale_mismatch =
+      direct_search(alternate);
+    expect(
+      stale_mismatch.nodes > 1
+        && stale_mismatch.result.score
+             == cold.result.score,
+      "a stale position score is rejected when its history tag differs");
+
+    table.new_search();
+    const WindowResult stale_match =
+      direct_search(alternate);
+    expect(
+      stale_match.nodes == 1
+        && stale_match.result.score
+             == cold.result.score,
+      "a stale position score remains reusable for its original history tag");
+
+    expect(
+      positions_equal(position, original)
+        && first.current_key() == root_key
+        && alternate.current_key() == root_key,
+      "generation-aware probes preserve the position and both histories");
+}
+
+void test_repetition_sensitive_storage() {
+    Position position = child_repetition_position();
+    const Position original = position;
+    const PositionKey root_key = position.key();
+    MoveList legal_moves;
+    generate_legal_moves(position, legal_moves);
+    expect(
+      !legal_moves.empty(),
+      "the repetition-sensitive fixture has a legal table move");
+    if (legal_moves.empty())
+        return;
+
+    const PositionKey repeated_ancestor =
+      root_key ^ PositionKey{0x7777777777777777ULL};
+    const std::array ancestor_keys = {
+      repeated_ancestor,
+      repeated_ancestor,
+      root_key,
+    };
+    PositionHistory ancestor_history =
+      make_history(ancestor_keys);
+    expect(
+      ancestor_history.has_repeated_position()
+        && !ancestor_history.is_twofold(),
+      "the repetition-risk fixture repeats an earlier noncurrent position");
+
+    constexpr Score unsafe_cached_score =
+      INFINITE_SCORE - 1;
+    TranspositionTable guarded_table;
+    guarded_table.new_search();
+    guarded_table.store(
+      root_key,
+      ancestor_history.context(),
+      1,
+      unsafe_cached_score,
+      TranspositionBound::EXACT,
+      legal_moves[0]);
+    PositionHistory guarded_working{
+      ancestor_history};
+    SearchDetail::SearchState guarded_state{
+      SearchDetail::UnlimitedBudget{},
+      &guarded_table};
+    const auto guarded =
+      SearchDetail::alpha_beta(
+        position,
+        guarded_working,
+        1,
+        0,
+        -INFINITE_SCORE,
+        INFINITE_SCORE,
+        guarded_state);
+    const TranspositionEntry* retained =
+      guarded_table.find(root_key);
+    expect(
+      guarded
+        && guarded->repetition_sensitive
+        && guarded_state.nodes > 1
+        && guarded->score != unsafe_cached_score
+        && retained
+        && retained->score == unsafe_cached_score,
+      "any repeated ancestor bypasses score probing and suppresses replacement storage");
+
+    constexpr Move repeating_move = Move::normal(
+      make_square(FILE_H, RANK_5),
+      make_square(FILE_H, RANK_6));
+    Position child = position;
+    UndoState child_undo;
+    do_move(child, repeating_move, child_undo);
+    const std::array descendant_keys = {
+      child.key(),
+      root_key,
+    };
+    PositionHistory descendant_history =
+      make_history(descendant_keys);
+    expect(
+      !descendant_history.has_repeated_position(),
+      "the descendant fixture begins without a duplicated key");
+
+    TranspositionTable descendant_table;
+    descendant_table.new_search();
+    PositionHistory descendant_working{
+      descendant_history};
+    SearchDetail::SearchState descendant_state{
+      SearchDetail::UnlimitedBudget{},
+      &descendant_table};
+    const auto descendant =
+      SearchDetail::alpha_beta(
+        position,
+        descendant_working,
+        1,
+        0,
+        -INFINITE_SCORE,
+        INFINITE_SCORE,
+        descendant_state);
+    expect(
+      descendant
+        && descendant->repetition_sensitive
+        && descendant_table.find(root_key)
+             == nullptr,
+      "a repetition reached below the root propagates and prevents root-bound storage");
+
+    expect(
+      positions_equal(position, original)
+        && history_matches(
+             ancestor_history,
+             ancestor_keys)
+        && history_matches(
+             descendant_history,
+             descendant_keys),
+      "repetition-sensitive searches restore position and histories");
 }
 
 void test_history_dependent_scores() {
@@ -917,7 +1513,6 @@ void test_history_dependent_scores() {
              == repeating_move
         && unrepeated.score
              == fresh_reference.score
-        && unrepeated.score == -QUEEN_VALUE
         && unrepeated.has_move()
         && unrepeated.nodes > 1,
       "the same board retains history-dependent repetition scores");
@@ -930,13 +1525,13 @@ void test_history_dependent_scores() {
       repeated_warm.score == repeated.score
         && repeated_warm.best_move
              == repeated.best_move
-        && repeated_warm.nodes == 1
+        && repeated_warm.nodes > 1
         && fresh_warm.score
              == unrepeated.score
         && fresh_warm.best_move
              == unrepeated.best_move
         && fresh_warm.nodes == 1,
-      "each matching history context reuses only its own exact result");
+      "repetition-sensitive results are recomputed while safe stale results remain reusable");
 
     TranspositionTable reverse_table;
     const SearchResult fresh_first =
@@ -946,12 +1541,23 @@ void test_history_dependent_scores() {
       search(
         position, seeded, 1, reverse_table);
     expect(
-      fresh_first.score == -QUEEN_VALUE
+      fresh_first.score == fresh_reference.score
         && repeated_second.score == DRAW_SCORE
         && repeated_second.best_move
              == repeating_move
         && repeated_second.nodes > 1,
-      "history-dependent scores remain separate in either insertion order");
+      "a repetition-sensitive path rejects and preserves an earlier safe score");
+
+    const SearchResult fresh_after_repetition =
+      search(
+        position, fresh, 1, reverse_table);
+    expect(
+      fresh_after_repetition.score
+          == fresh_first.score
+        && fresh_after_repetition.best_move
+             == fresh_first.best_move
+        && fresh_after_repetition.nodes == 1,
+      "a repetition-sensitive search does not overwrite a stale safe result");
 
     expect(
       positions_equal(position, original)
@@ -1007,7 +1613,10 @@ void test_terminal_classification_precedes_table() {
 }  // namespace
 
 int main() {
+    test_hashfull_sampling();
     test_table_storage_and_collisions();
+    test_static_evaluation_cache();
+    test_quiescence_storage_protection();
     test_identity_replacement_and_move_hints();
     test_generation_replacement_and_hints();
     test_bound_storage_and_cutoffs();
@@ -1015,6 +1624,8 @@ int main() {
     test_warm_table_and_cancellation();
     test_budget_precedes_cached_results();
     test_invalid_cached_move_is_ignored();
+    test_generation_score_eligibility();
+    test_repetition_sensitive_storage();
     test_history_dependent_scores();
     test_terminal_classification_precedes_table();
 

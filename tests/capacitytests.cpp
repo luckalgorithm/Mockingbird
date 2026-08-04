@@ -170,11 +170,52 @@ static_assert(high_mobility_move_count() > 256);
 void test_capacity_bound() {
     using namespace Mockingbird;
 
-    expect(MoveList::capacity() == 528,
-           "move-list capacity is 528");
-    expect(MoveList::capacity()
-             >= STANDARD_INVENTORY_MOVE_UPPER_BOUND,
-           "move-list capacity covers the standard-inventory upper bound");
+    expect(
+      MoveList::INLINE_CAPACITY > 0
+        && MoveList::INLINE_CAPACITY
+             < STANDARD_INVENTORY_MOVE_UPPER_BOUND,
+      "inline storage limits stack use before safe overflow storage");
+    expect(
+      MoveList::capacity()
+        >= ABSOLUTE_MOVE_UPPER_BOUND,
+      "move-list capacity covers every geometric source bound");
+}
+
+void test_overflow_storage() {
+    using namespace Mockingbird;
+
+    constexpr Move move = Move::normal(
+      make_square(FILE_D, RANK_1),
+      make_square(FILE_D, RANK_2));
+    MoveList moves;
+
+    for (std::size_t index = 0;
+         index < MoveList::INLINE_CAPACITY + 17;
+         ++index) {
+        moves.push_back(move);
+    }
+
+    expect(
+      moves.size() == MoveList::INLINE_CAPACITY + 17
+        && moves[0] == move
+        && moves[MoveList::INLINE_CAPACITY] == move
+        && moves[moves.size() - 1] == move,
+      "overflow storage preserves a contiguous move sequence");
+
+    moves.truncate(2);
+    moves.push_back(move);
+    expect(
+      moves.size() == 3
+        && moves[0] == move
+        && moves[2] == move,
+      "truncating overflow storage preserves reusable contiguous storage");
+
+    moves.clear();
+    moves.push_back(move);
+    expect(
+      moves.size() == 1
+        && moves[0] == move,
+      "clearing a spilled list restores reusable inline storage");
 }
 
 void test_high_mobility_position() {
@@ -202,6 +243,7 @@ void test_high_mobility_position() {
 
 int main() {
     test_capacity_bound();
+    test_overflow_storage();
     test_high_mobility_position();
 
     if (failures != 0) {

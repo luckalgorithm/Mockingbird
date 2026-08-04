@@ -128,6 +128,74 @@ constexpr void generate_sliding_piece_moves(
     }
 }
 
+template<PieceType Piece>
+constexpr void generate_sliding_piece_captures(
+  const Position& position, MoveList& moves) noexcept {
+    static_assert(Piece == BISHOP || Piece == ROOK || Piece == QUEEN);
+
+    const Color us = position.side_to_move();
+    const Bitboard enemies =
+      position.occupied() & ~position.pieces(team_of(us));
+    const Bitboard occupied = position.occupied();
+    Bitboard pieces = position.pieces(us, Piece);
+
+    while (pieces) {
+        const Square from = pieces.pop_lsb();
+        Bitboard destinations =
+          sliding_attacks<Piece>(from, occupied) & enemies;
+
+        while (destinations)
+            moves.push_back(Move::normal(from, destinations.pop_lsb()));
+    }
+}
+
+// Generates pawn captures and every promotion without generating ordinary
+// non-promoting pushes. The order is the tactical subsequence of
+// generate_pawn_moves().
+constexpr void generate_pawn_tactical_moves(
+  const Position& position, MoveList& moves) noexcept {
+    const Color us = position.side_to_move();
+    const Bitboard occupied = position.occupied();
+    const Bitboard enemies = occupied & ~position.pieces(team_of(us));
+    const Bitboard us_pawns = position.pieces(us, PAWN);
+    const EnPassantTargets en_passant =
+      eligible_en_passant_targets(position, us);
+    Bitboard pawns = us_pawns;
+
+    while (pawns) {
+        const Square from = pawns.pop_lsb();
+        const Square single = pawn_push_destination(us, from);
+        if (single != SQ_NONE
+            && !occupied.test(single)
+            && is_pawn_promotion_square(us, single)) {
+            append_pawn_move(us, from, single, moves);
+        }
+
+        Bitboard captures =
+          pawn_attacks(us, from) & enemies & ~en_passant.squares;
+        while (captures) {
+            append_pawn_move(
+              us, from, captures.pop_lsb(), moves);
+        }
+    }
+
+    for (int owner_index = 0;
+         owner_index < COLOR_NB;
+         ++owner_index) {
+        const Square target =
+          en_passant.by_owner[std::size_t(owner_index)];
+        if (target == SQ_NONE)
+            continue;
+
+        Bitboard capturers =
+          pawn_attack_sources(us, target) & us_pawns;
+        while (capturers) {
+            append_en_passant_move(
+              us, capturers.pop_lsb(), target, moves);
+        }
+    }
+}
+
 }  // namespace Detail
 
 // Appends pseudo-legal knight moves for the side to move. Squares occupied by
@@ -301,6 +369,39 @@ constexpr void generate_moves(
   const Position& position, MoveList& moves) noexcept {
     generate_pawn_moves(position, moves);
     generate_nonpawn_moves(position, moves);
+}
+
+// Appends pseudo-legal captures and promotions in the same relative order as
+// generate_moves(). Ordinary non-promoting pushes, quiet piece moves, and
+// castling are omitted. Check and pin constraints are not evaluated.
+// Precondition: moves has enough remaining capacity for the generated moves.
+constexpr void generate_tactical_moves(
+  const Position& position, MoveList& moves) noexcept {
+    Detail::generate_pawn_tactical_moves(position, moves);
+
+    const Color us = position.side_to_move();
+    const Bitboard enemies =
+      position.occupied() & ~position.pieces(team_of(us));
+
+    Bitboard knights = position.pieces(us, KNIGHT);
+    while (knights) {
+        const Square from = knights.pop_lsb();
+        Bitboard destinations = knight_attacks(from) & enemies;
+        while (destinations)
+            moves.push_back(Move::normal(from, destinations.pop_lsb()));
+    }
+
+    Detail::generate_sliding_piece_captures<BISHOP>(position, moves);
+    Detail::generate_sliding_piece_captures<ROOK>(position, moves);
+    Detail::generate_sliding_piece_captures<QUEEN>(position, moves);
+
+    Bitboard kings = position.pieces(us, KING);
+    while (kings) {
+        const Square from = kings.pop_lsb();
+        Bitboard destinations = king_attacks(from) & enemies;
+        while (destinations)
+            moves.push_back(Move::normal(from, destinations.pop_lsb()));
+    }
 }
 
 }  // namespace Mockingbird

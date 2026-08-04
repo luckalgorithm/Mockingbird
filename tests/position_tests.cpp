@@ -79,6 +79,10 @@ void expect_consistent(const Mockingbird::Position& position) {
 
     expect(position.key() == position.recompute_key(),
            "cached key matches the canonical position state");
+    expect(
+      position.static_evaluation_state()
+        == position.recompute_static_evaluation_state(),
+      "cached evaluation state matches the mailbox");
 
     Bitboard expected_occupied;
     std::array<Bitboard, COLOR_NB> expected_by_color{};

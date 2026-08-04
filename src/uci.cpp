@@ -7,6 +7,7 @@
 #include <charconv>
 #include <chrono>
 #include <concepts>
+#include <condition_variable>
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
@@ -48,6 +49,9 @@ inline constexpr std::size_t MAX_HASH_MEGABYTES = 1024;
 inline constexpr std::uint64_t DEFAULT_MOVE_OVERHEAD_MS = 10;
 inline constexpr std::uint64_t MAX_MOVE_OVERHEAD_MS = 5000;
 inline constexpr std::uint64_t CLOCK_ALLOCATION_DIVISOR = 20;
+inline constexpr std::uint64_t CLOCK_INCREMENT_NUMERATOR = 3;
+inline constexpr std::uint64_t CLOCK_INCREMENT_DENOMINATOR = 4;
+inline constexpr std::uint64_t CLOCK_HARD_LIMIT_MULTIPLIER = 3;
 
 [[nodiscard]] constexpr bool is_ascii_whitespace(
   char character) noexcept {
@@ -452,15 +456,63 @@ subtract_overhead(
         : 0;
 }
 
-[[nodiscard]] std::optional<std::uint64_t>
+struct TimeAllocation {
+    std::uint64_t soft_ms = 0;
+    std::uint64_t hard_ms = 0;
+};
+
+[[nodiscard]] constexpr std::uint64_t
+saturating_add(
+  std::uint64_t left,
+  std::uint64_t right) noexcept {
+    return left
+             > std::numeric_limits<std::uint64_t>::max()
+                 - right
+      ? std::numeric_limits<std::uint64_t>::max()
+      : left + right;
+}
+
+[[nodiscard]] constexpr std::uint64_t
+saturating_multiply(
+  std::uint64_t value,
+  std::uint64_t multiplier) noexcept {
+    if (multiplier == 0)
+        return 0;
+
+    return value
+             > std::numeric_limits<std::uint64_t>::max()
+                 / multiplier
+      ? std::numeric_limits<std::uint64_t>::max()
+      : value * multiplier;
+}
+
+[[nodiscard]] constexpr std::uint64_t
+scaled_fraction(
+  std::uint64_t value,
+  std::uint64_t numerator,
+  std::uint64_t denominator) noexcept {
+    assert(denominator > 0);
+    assert(numerator <= denominator);
+
+    const std::uint64_t quotient =
+      value / denominator;
+    const std::uint64_t remainder =
+      value % denominator;
+    return saturating_add(
+      saturating_multiply(quotient, numerator),
+      remainder * numerator / denominator);
+}
+
+[[nodiscard]] std::optional<TimeAllocation>
 allocated_time(
   const GoRequest& request,
   Color side_to_move,
   std::uint64_t overhead_ms) noexcept {
     if (request.movetime_ms) {
-        return subtract_overhead(
+        const std::uint64_t usable = subtract_overhead(
           *request.movetime_ms,
           overhead_ms);
+        return TimeAllocation{usable, usable};
     }
 
     const auto remaining =
@@ -474,7 +526,7 @@ allocated_time(
       subtract_overhead(
         *remaining, overhead_ms);
     if (usable == 0)
-        return 0;
+        return TimeAllocation{};
 
     const std::uint64_t increment =
       request.increment_ms[
@@ -485,39 +537,46 @@ allocated_time(
       request.moves_to_go.value_or(
         CLOCK_ALLOCATION_DIVISOR);
     const std::uint64_t base =
-      *remaining / divisor;
+      usable / divisor;
     const std::uint64_t increment_share =
-      increment / 2;
+      scaled_fraction(
+        increment,
+        CLOCK_INCREMENT_NUMERATOR,
+        CLOCK_INCREMENT_DENOMINATOR);
 
-    // The current allocation uses a fraction of remaining time plus half of
-    // the increment, capped at the usable clock.
+    // The soft limit controls whether another iteration starts. The hard
+    // limit permits a difficult iteration to use additional time without
+    // risking the clock remaining after overhead.
     const std::uint64_t desired =
-      base
-          > std::numeric_limits<
-              std::uint64_t>::max()
-              - increment_share
-        ? std::numeric_limits<
-            std::uint64_t>::max()
-        : base + increment_share;
+      saturating_add(base, increment_share);
+    const std::uint64_t soft =
+      desired < usable ? desired : usable;
+    const std::uint64_t expanded =
+      saturating_multiply(
+        soft, CLOCK_HARD_LIMIT_MULTIPLIER);
+    const std::uint64_t hard =
+      expanded < usable ? expanded : usable;
 
-    return desired < usable
-        ? desired
-        : usable;
+    return TimeAllocation{soft, hard};
 }
 
 [[nodiscard]] constexpr std::uint64_t
 bounded_milliseconds(
   std::uint64_t milliseconds) noexcept {
+    using Milliseconds = std::chrono::milliseconds;
+    constexpr auto maximum_count =
+      std::chrono::duration_cast<Milliseconds>(
+        SearchDuration::max())
+        .count();
+    static_assert(maximum_count > 0);
     constexpr auto maximum =
-      static_cast<std::uint64_t>(
-        std::numeric_limits<
-          std::chrono::milliseconds::rep>::max());
+      static_cast<std::uint64_t>(maximum_count);
     return milliseconds > maximum
         ? maximum
         : milliseconds;
 }
 
-[[nodiscard]] SearchDuration search_duration(
+[[nodiscard]] constexpr SearchDuration search_duration(
   std::uint64_t milliseconds) noexcept {
     using Milliseconds =
       std::chrono::milliseconds;
@@ -574,28 +633,147 @@ void write_score(
             milliseconds);
 }
 
-void write_search_result(
+[[nodiscard]] std::uint64_t nodes_per_second(
+  std::uint64_t nodes,
+  std::uint64_t elapsed_ms) noexcept {
+    const std::uint64_t divisor =
+      elapsed_ms == 0 ? 1 : elapsed_ms;
+    constexpr std::uint64_t scale = 1000;
+
+    if (nodes
+        <= std::numeric_limits<std::uint64_t>::max()
+             / scale) {
+        return nodes * scale / divisor;
+    }
+
+    const long double rate =
+      static_cast<long double>(nodes)
+      * static_cast<long double>(scale)
+      / static_cast<long double>(divisor);
+    const long double maximum =
+      static_cast<long double>(
+        std::numeric_limits<std::uint64_t>::max());
+    return rate >= maximum
+        ? std::numeric_limits<std::uint64_t>::max()
+        : static_cast<std::uint64_t>(rate);
+}
+
+// Builds a legal principal-variation prefix after an iteration has completed.
+// Following only exact entries from the active table generation avoids adding
+// principal-variation copying to the recursive search. Replacement, a missing
+// exact entry, or a repeated position safely truncates the reported line.
+[[nodiscard]] std::string principal_variation_text(
+  const Position& root,
+  Move best_move,
+  int selective_depth,
+  const TranspositionTable& table) {
+    if (!best_move.is_board_move())
+        return {};
+
+    assert(selective_depth >= 0);
+    assert(selective_depth <= MAX_SEARCH_PLY);
+    const int maximum_moves =
+      selective_depth > 0 ? selective_depth : 1;
+    Position position = root;
+    std::array<
+      PositionKey,
+      static_cast<std::size_t>(MAX_SEARCH_PLY) + 1>
+      visited{};
+    std::size_t visited_count = 1;
+    visited[0] = position.key();
+
+    std::string variation;
+    variation.reserve(
+      static_cast<std::size_t>(maximum_moves) * 8);
+    MoveList legal_moves;
+    Move move = best_move;
+    for (int ply = 0;
+         ply < maximum_moves;
+         ++ply) {
+        legal_moves.clear();
+        generate_legal_moves(position, legal_moves);
+        bool legal = false;
+        for (const Move candidate : legal_moves) {
+            if (candidate == move) {
+                legal = true;
+                break;
+            }
+        }
+        if (!legal)
+            break;
+
+        if (!variation.empty())
+            variation += ' ';
+        variation += serialize_move(move);
+
+        UndoState unused_undo;
+        do_move(position, move, unused_undo);
+        const PositionKey child_key = position.key();
+        bool repeated = false;
+        for (std::size_t index = 0;
+             index < visited_count;
+             ++index) {
+            if (visited[index] == child_key) {
+                repeated = true;
+                break;
+            }
+        }
+        if (repeated)
+            break;
+
+        assert(visited_count < visited.size());
+        visited[visited_count++] = child_key;
+        const TranspositionEntry* const entry =
+          table.find(child_key);
+        if (!entry
+            || entry->generation != table.generation()
+            || entry->bound != TranspositionBound::EXACT
+            || !entry->best_move.is_board_move()) {
+            break;
+        }
+        move = entry->best_move;
+    }
+
+    return variation;
+}
+
+void write_search_info(
   std::ostream& output,
   int depth,
+  int selective_depth,
   Score score,
   std::uint64_t nodes,
+  std::uint16_t hashfull,
   std::uint64_t elapsed_ms,
-  Move best_move) {
+  std::string_view principal_variation) {
     write_text(output, "info depth ");
     write_integer(output, depth);
+    write_text(output, " seldepth ");
+    write_integer(output, selective_depth);
+    write_text(output, " multipv 1");
     write_text(output, " score ");
     write_score(output, score);
     write_text(output, " nodes ");
     write_integer(output, nodes);
+    write_text(output, " nps ");
+    write_integer(
+      output,
+      nodes_per_second(nodes, elapsed_ms));
+    write_text(output, " hashfull ");
+    write_integer(output, hashfull);
     write_text(output, " time ");
     write_integer(output, elapsed_ms);
-    if (best_move.is_board_move()) {
+    if (!principal_variation.empty()) {
         write_text(output, " pv ");
-        write_text(
-          output,
-          serialize_move(best_move));
+        write_text(output, principal_variation);
     }
-    write_text(output, "\nbestmove ");
+    write_text(output, "\n");
+}
+
+void write_best_move(
+  std::ostream& output,
+  Move best_move) {
+    write_text(output, "bestmove ");
     if (best_move.is_board_move()) {
         write_text(
           output,
@@ -604,7 +782,29 @@ void write_search_result(
         write_text(output, "0000");
     }
     write_text(output, "\n");
-    output.flush();
+}
+
+void write_search_result(
+  std::ostream& output,
+  int depth,
+  Score score,
+  std::uint64_t nodes,
+  std::uint64_t elapsed_ms,
+  Move best_move) {
+    const std::string principal_variation =
+      best_move.is_board_move()
+        ? serialize_move(best_move)
+        : std::string{};
+    write_search_info(
+      output,
+      depth,
+      depth,
+      score,
+      nodes,
+      0,
+      elapsed_ms,
+      principal_variation);
+    write_best_move(output, best_move);
 }
 
 [[nodiscard]] constexpr std::string_view
@@ -669,6 +869,7 @@ class UciSession {
                 " default 1 min 1 max 1"
                 "\noption name Move Overhead type spin"
                 " default 10 min 0 max 5000"
+                "\noption name Ponder type check default false"
                 "\noption name UCI_Variant type combo"
                 " default 4pc var 4pc"
                 "\nuciok\n");
@@ -689,6 +890,21 @@ class UciSession {
 
     void stop() {
         stop_search();
+    }
+
+    void ponder_hit() {
+        std::scoped_lock lock{ponder_mutex_};
+        if (!pondering_)
+            return;
+
+        if (active_time_control_) {
+            static_cast<void>(
+              active_time_control_->activate(
+                SearchClock::now()));
+        }
+        pondering_ = false;
+        ponder_output_released_ = true;
+        ponder_condition_.notify_all();
     }
 
     void set_option(
@@ -778,6 +994,15 @@ class UciSession {
                   "Move Overhead value is outside 0..5000";
             } else {
                 move_overhead_ms_ = overhead;
+            }
+        } else if (normalized_name == "ponder") {
+            if (normalized_value != "true"
+                && normalized_value != "false") {
+                error =
+                  "Ponder supports only true or false";
+            } else {
+                ponder_enabled_ =
+                  normalized_value == "true";
             }
         } else if (
           normalized_name == "uci_variant") {
@@ -884,10 +1109,18 @@ class UciSession {
                 return;
             }
 
+            const bool irreversible =
+              is_repetition_irreversible(
+                candidate, *move);
             UndoState undo;
             do_move(candidate, *move, undo);
-            candidate_history.push(
-              candidate.key());
+            if (irreversible) {
+                candidate_history.reset(
+                  candidate.key());
+            } else {
+                candidate_history.push(
+                  candidate.key());
+            }
         }
 
         position_ = std::move(candidate);
@@ -978,9 +1211,9 @@ class UciSession {
         const bool wait_for_stop =
           request->infinite
           || request->ponder;
-        const auto time_ms =
-          wait_for_stop
-            ? std::optional<std::uint64_t>{}
+        const auto time_allocation =
+          request->infinite
+            ? std::optional<TimeAllocation>{}
             : allocated_time(
                 *request,
                 position_.side_to_move(),
@@ -988,7 +1221,7 @@ class UciSession {
         const bool has_finite_limit =
           request->depth
           || request->nodes
-          || time_ms;
+          || time_allocation;
 
         limits.max_depth =
           request->depth.value_or(
@@ -997,9 +1230,17 @@ class UciSession {
               : DEFAULT_SEARCH_DEPTH);
         limits.node_limit =
           request->nodes;
-        if (time_ms) {
+        std::shared_ptr<
+          SearchDetail::SearchTimeControl>
+          time_control;
+        if (time_allocation
+            && !request->ponder) {
             limits.time_limit =
-              search_duration(*time_ms);
+              search_duration(
+                time_allocation->hard_ms);
+            limits.soft_time_limit =
+              search_duration(
+                time_allocation->soft_ms);
         }
         limits.external_stop = &stop_requested_;
 
@@ -1011,6 +1252,28 @@ class UciSession {
         // Search mutates private root-state copies. The command thread keeps
         // the session position available for read-only diagnostic commands.
         try {
+            if (time_allocation
+                && request->ponder) {
+                time_control = std::make_shared<
+                  SearchDetail::SearchTimeControl>(
+                    search_duration(
+                      time_allocation->hard_ms),
+                    search_duration(
+                      time_allocation->soft_ms));
+                limits.time_control =
+                  time_control.get();
+            }
+
+            {
+                const std::scoped_lock lock{
+                  ponder_mutex_};
+                active_time_control_ =
+                  std::move(time_control);
+                pondering_ = request->ponder;
+                ponder_output_released_ =
+                  !request->ponder;
+            }
+
             search_thread_ = std::jthread(
               [this,
                search_position =
@@ -1018,16 +1281,109 @@ class UciSession {
                search_history =
                  std::move(search_history),
                limits,
-               fallback_move]() mutable {
+               fallback_move,
+               ponder_search =
+                 request->ponder]() mutable {
                   [[maybe_unused]]
                   const PositionKey root_key =
                     search_position.key();
+                  struct BufferedSearchInfo {
+                      int depth = 0;
+                      int selective_depth = 0;
+                      Score score = DRAW_SCORE;
+                      std::uint64_t nodes = 0;
+                      std::uint16_t hashfull = 0;
+                      std::uint64_t elapsed_ms = 0;
+                      std::string principal_variation;
+                  };
+
+                  std::array<
+                    BufferedSearchInfo,
+                    static_cast<std::size_t>(
+                      MAX_SEARCH_DEPTH)>
+                    buffered_infos{};
+                  std::size_t buffered_info_count = 0;
+                  bool completed_info_emitted = false;
+                  const auto report_completion =
+                    [this,
+                     &search_position,
+                     &buffered_infos,
+                     &buffered_info_count,
+                     &completed_info_emitted](
+                      const CompletedIteration& completed,
+                      std::uint64_t total_nodes,
+                      SearchDuration elapsed) {
+                        BufferedSearchInfo info{
+                          completed.depth,
+                          completed.selective_depth,
+                          completed.result.score,
+                          total_nodes,
+                          table_->hashfull_per_mille(),
+                          elapsed_milliseconds(elapsed),
+                          principal_variation_text(
+                            search_position,
+                            completed.result.best_move,
+                            completed.selective_depth,
+                            *table_),
+                        };
+                        bool output_released = false;
+                        {
+                            const std::scoped_lock lock{
+                              ponder_mutex_};
+                            output_released =
+                              ponder_output_released_;
+                        }
+
+                        if (!output_released) {
+                            assert(
+                              buffered_info_count
+                              < buffered_infos.size());
+                            buffered_infos[
+                              buffered_info_count] =
+                                std::move(info);
+                            ++buffered_info_count;
+                            return;
+                        }
+
+                        output_.write(
+                          [&](std::ostream& output) {
+                              for (std::size_t index = 0;
+                                   index
+                                     < buffered_info_count;
+                                   ++index) {
+                                  const BufferedSearchInfo&
+                                    buffered =
+                                      buffered_infos[index];
+                                  write_search_info(
+                                    output,
+                                    buffered.depth,
+                                    buffered.selective_depth,
+                                    buffered.score,
+                                    buffered.nodes,
+                                    buffered.hashfull,
+                                    buffered.elapsed_ms,
+                                    buffered.principal_variation);
+                              }
+                              write_search_info(
+                                output,
+                                info.depth,
+                                info.selective_depth,
+                                info.score,
+                                info.nodes,
+                                info.hashfull,
+                                info.elapsed_ms,
+                                info.principal_variation);
+                          });
+                        buffered_info_count = 0;
+                        completed_info_emitted = true;
+                    };
                   const IterativeResult result =
                     iterative_search(
                       search_position,
                       search_history,
                       limits,
-                      *table_);
+                      *table_,
+                      report_completion);
                   assert(
                     search_position.key()
                     == root_key);
@@ -1055,23 +1411,61 @@ class UciSession {
                       }
                   }
 
+                  if (ponder_search) {
+                      std::unique_lock lock{
+                        ponder_mutex_};
+                      ponder_condition_.wait(
+                        lock,
+                        [this] {
+                            return ponder_output_released_;
+                        });
+                  }
+
                   output_.write(
                     [&](std::ostream& output) {
-                        write_search_result(
-                          output,
-                          depth,
-                          score,
-                          result.total_nodes,
-                          elapsed_milliseconds(
-                            result.elapsed),
-                          best_move);
+                        for (std::size_t index = 0;
+                             index < buffered_info_count;
+                             ++index) {
+                            const BufferedSearchInfo& info =
+                              buffered_infos[index];
+                            write_search_info(
+                              output,
+                              info.depth,
+                              info.selective_depth,
+                              info.score,
+                              info.nodes,
+                              info.hashfull,
+                              info.elapsed_ms,
+                              info.principal_variation);
+                        }
+                        if (!completed_info_emitted
+                            && buffered_info_count == 0) {
+                            const std::string fallback_variation =
+                              best_move.is_board_move()
+                                ? serialize_move(best_move)
+                                : std::string{};
+                            write_search_info(
+                              output,
+                              depth,
+                              0,
+                              score,
+                              result.total_nodes,
+                              table_->hashfull_per_mille(),
+                              elapsed_milliseconds(
+                                result.elapsed),
+                              fallback_variation);
+                        }
+                        write_best_move(
+                          output, best_move);
                     });
               });
         } catch (const std::bad_alloc&) {
+            clear_ponder_state();
             write_search_error(
               "search thread allocation failed",
               fallback_move);
         } catch (const std::system_error&) {
+            clear_ponder_state();
             write_search_error(
               "search thread could not start",
               fallback_move);
@@ -1234,16 +1628,34 @@ class UciSession {
 
   private:
     void stop_search() {
-        if (!search_thread_.joinable())
+        if (!search_thread_.joinable()) {
+            clear_ponder_state();
             return;
+        }
 
         // SearchBudget observes this flag at node entry. Joining also covers a
         // worker that finished before the stop command arrived.
         stop_requested_.store(
           true, std::memory_order_relaxed);
+        {
+            const std::scoped_lock lock{
+              ponder_mutex_};
+            pondering_ = false;
+            ponder_output_released_ = true;
+        }
+        ponder_condition_.notify_all();
         search_thread_.join();
         stop_requested_.store(
           false, std::memory_order_relaxed);
+        clear_ponder_state();
+    }
+
+    void clear_ponder_state() {
+        const std::scoped_lock lock{
+          ponder_mutex_};
+        active_time_control_.reset();
+        pondering_ = false;
+        ponder_output_released_ = true;
     }
 
     void write_search_error(
@@ -1280,6 +1692,14 @@ class UciSession {
     std::unique_ptr<TranspositionTable> table_;
     std::jthread search_thread_;
     std::atomic_bool stop_requested_{false};
+    std::mutex ponder_mutex_;
+    std::condition_variable ponder_condition_;
+    std::shared_ptr<
+      SearchDetail::SearchTimeControl>
+      active_time_control_;
+    bool pondering_ = false;
+    bool ponder_output_released_ = true;
+    bool ponder_enabled_ = false;
     std::uint64_t move_overhead_ms_ =
       DEFAULT_MOVE_OVERHEAD_MS;
     bool position_valid_ = true;
@@ -1319,9 +1739,10 @@ int run_uci(
             session.set_position(tokens);
         } else if (command == "go") {
             session.go(tokens);
-        } else if (command == "stop"
-                   || command == "ponderhit") {
+        } else if (command == "stop") {
             session.stop();
+        } else if (command == "ponderhit") {
+            session.ponder_hit();
         } else if (command == "fen") {
             session.write_fen();
         } else if (command == "legalmoves") {
@@ -1364,5 +1785,18 @@ static_assert(
   <= MAX_HASH_MEGABYTES);
 static_assert(hash_bucket_count(1) > 0);
 static_assert(CLOCK_ALLOCATION_DIVISOR > 0);
+static_assert(CLOCK_INCREMENT_NUMERATOR
+              <= CLOCK_INCREMENT_DENOMINATOR);
+static_assert(CLOCK_INCREMENT_DENOMINATOR > 0);
+static_assert(CLOCK_HARD_LIMIT_MULTIPLIER > 0);
+static_assert(saturating_add(
+                std::numeric_limits<std::uint64_t>::max(),
+                1)
+              == std::numeric_limits<std::uint64_t>::max());
+static_assert(scaled_fraction(100, 3, 4) == 75);
+static_assert(
+  search_duration(
+    std::numeric_limits<std::uint64_t>::max())
+  <= SearchDuration::max());
 
 }  // namespace Mockingbird

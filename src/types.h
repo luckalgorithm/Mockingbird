@@ -96,7 +96,7 @@ enum PieceType : int {
 //
 // For example, make_piece(BLUE, ROOK) is (1 << 3) | 4 == 12.
 // Values 7, 8, 15, 16, 23, and 24 are unused.
-enum Piece : int {
+enum Piece : std::uint8_t {
     NO_PIECE,
 
     R_PAWN = (RED << 3) | PAWN,
@@ -129,6 +129,8 @@ enum Piece : int {
 
     PIECE_NB = 32
 };
+
+static_assert(sizeof(Piece) == sizeof(std::uint8_t));
 
 // NO_PIECE_TYPE and PIECE_TYPE_NB are sentinels rather than real types.
 [[nodiscard]] constexpr bool is_ok(PieceType piece_type) noexcept {

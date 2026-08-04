@@ -433,6 +433,39 @@ void test_all_single_blockers() {
     }
 }
 
+void test_mixed_blocker_patterns() {
+    using namespace Mockingbird;
+
+    // The fixed generator supplies reproducible occupancies ranging from
+    // sparse to dense across playable squares, padding, and cut-out corners.
+    std::uint64_t state = 0xD1B5'4A32'D192'ED03ULL;
+    for (unsigned pattern = 0; pattern < 256; ++pattern) {
+        Bitboard occupied;
+        const std::uint64_t threshold = pattern % 15 + 1;
+
+        for (int square_index = 0; square_index < SQUARE_NB; ++square_index) {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            if ((state >> 60) < threshold)
+                occupied.set(Square(square_index));
+        }
+
+        for (int source_index = 0; source_index < SQUARE_NB; ++source_index) {
+            const Square source = Square(source_index);
+            expect(rook_attacks(source, occupied)
+                     == reference_rook_attacks(source, occupied),
+                   "rook attacks match mixed blocker patterns");
+            expect(bishop_attacks(source, occupied)
+                     == reference_bishop_attacks(source, occupied),
+                   "bishop attacks match mixed blocker patterns");
+            expect(queen_attacks(source, occupied)
+                     == reference_queen_attacks(source, occupied),
+                   "queen attacks match mixed blocker patterns");
+        }
+    }
+}
+
 void test_pawn_geometric_equivalence() {
     using namespace Mockingbird;
 
@@ -468,6 +501,61 @@ void test_pawn_geometric_equivalence() {
     }
 }
 
+void test_bulk_pawn_attacks() {
+    using namespace Mockingbird;
+
+    for (int color_index = 0; color_index < COLOR_NB; ++color_index) {
+        const Color color = Color(color_index);
+        const Color reverse = next_color(next_color(color));
+        Bitboard pawns;
+        Bitboard expected;
+
+        for (int source_index = 0;
+             source_index < SQUARE_NB;
+             ++source_index) {
+            const Square source = Square(source_index);
+            if (!is_ok(source))
+                continue;
+
+            pawns.set(source);
+            expected |= pawn_attacks(color, source);
+            expect(
+              pawn_attacks(color, pawns) == expected,
+              "bulk pawn attacks match cumulative scalar attacks");
+        }
+
+        for (int target_index = 0;
+             target_index < SQUARE_NB;
+             ++target_index) {
+            const Square target = Square(target_index);
+            if (!is_ok(target))
+                continue;
+
+            Bitboard target_zone = king_attacks(target);
+            target_zone.set(target);
+            const Bitboard reverse_sources =
+              pawn_attacks(reverse, target_zone);
+
+            for (int source_index = 0;
+                 source_index < SQUARE_NB;
+                 ++source_index) {
+                const Square source = Square(source_index);
+                if (!is_ok(source))
+                    continue;
+
+                const bool scalar_reaches_zone =
+                  static_cast<bool>(
+                    pawn_attacks(color, source) & target_zone);
+                expect(
+                  reverse_sources.test(source)
+                    == scalar_reaches_zone,
+                  "reverse pawn geometry identifies every source "
+                  "reaching a zone");
+            }
+        }
+    }
+}
+
 }  // namespace
 
 int main() {
@@ -481,7 +569,9 @@ int main() {
     test_all_ray_tables();
     test_all_directional_blocker_subsets();
     test_all_single_blockers();
+    test_mixed_blocker_patterns();
     test_pawn_geometric_equivalence();
+    test_bulk_pawn_attacks();
 
     if (failures != 0) {
         std::cerr << failures << " attack-table test(s) failed\n";

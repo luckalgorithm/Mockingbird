@@ -12,6 +12,7 @@
 #include <string_view>
 #include <type_traits>
 #include <utility>
+#include <vector>
 
 namespace {
 
@@ -128,6 +129,134 @@ void copy_assign(
     return true;
 }
 
+class ReferenceHistory {
+  public:
+    explicit ReferenceHistory(PositionKey initial_key)
+        : keys_{initial_key} {}
+
+    void reset(PositionKey initial_key) {
+        keys_.assign(1, initial_key);
+        boundaries_.clear();
+        segment_start_ = 0;
+    }
+
+    void push(PositionKey key, bool irreversible) {
+        if (irreversible) {
+            boundaries_.push_back({
+              keys_.size(),
+              segment_start_,
+            });
+            segment_start_ = keys_.size();
+        }
+
+        keys_.push_back(key);
+    }
+
+    void pop() {
+        const std::size_t child_index = keys_.size() - 1;
+        keys_.pop_back();
+
+        if (!boundaries_.empty()
+            && boundaries_.back().key_index
+                 == child_index) {
+            segment_start_ =
+              boundaries_.back().previous_segment_start;
+            boundaries_.pop_back();
+        }
+    }
+
+    [[nodiscard]] std::size_t size() const noexcept {
+        return keys_.size();
+    }
+
+    [[nodiscard]] PositionKey current_key() const noexcept {
+        return keys_.back();
+    }
+
+    [[nodiscard]] std::size_t count(
+      PositionKey key) const noexcept {
+        std::size_t occurrences = 0;
+        for (std::size_t index = segment_start_;
+             index < keys_.size();
+             ++index) {
+            if (keys_[index] == key)
+                ++occurrences;
+        }
+
+        return occurrences;
+    }
+
+    [[nodiscard]] bool has_repeated_position() const noexcept {
+        for (std::size_t left = segment_start_;
+             left < keys_.size();
+             ++left) {
+            for (std::size_t right = left + 1;
+                 right < keys_.size();
+                 ++right) {
+                if (keys_[left] == keys_[right])
+                    return true;
+            }
+        }
+
+        return false;
+    }
+
+    [[nodiscard]] HistoryContext context() const noexcept {
+        HistoryContext result =
+          RepetitionDetail::make_context(
+            keys_[segment_start_]);
+        for (std::size_t index = segment_start_ + 1;
+             index < keys_.size();
+             ++index) {
+            RepetitionDetail::add(result, keys_[index]);
+        }
+
+        return result;
+    }
+
+    [[nodiscard]] const std::vector<PositionKey>&
+    keys() const noexcept {
+        return keys_;
+    }
+
+  private:
+    struct Boundary {
+        std::size_t key_index = 0;
+        std::size_t previous_segment_start = 0;
+    };
+
+    std::vector<PositionKey> keys_;
+    std::vector<Boundary> boundaries_;
+    std::size_t segment_start_ = 0;
+};
+
+[[nodiscard]] bool histories_equal(
+  const PositionHistory& history,
+  const ReferenceHistory& reference) noexcept {
+    if (history.size() != reference.size()
+        || history.current_key()
+             != reference.current_key()
+        || history.current_count()
+             != reference.count(reference.current_key())
+        || history.is_twofold()
+             != (history.current_count() >= 2)
+        || history.is_threefold()
+             != (history.current_count() >= 3)
+        || history.has_repeated_position()
+             != reference.has_repeated_position()
+        || history.context() != reference.context()) {
+        return false;
+    }
+
+    for (const PositionKey key : reference.keys()) {
+        if (history.count(key) != reference.count(key))
+            return false;
+    }
+
+    return history.count(KEY_E + 1)
+        == reference.count(KEY_E + 1);
+}
+
 template<std::size_t Size>
 [[nodiscard]] constexpr bool all_distinct(
   const std::array<PositionKey, Size>& keys) noexcept {
@@ -150,6 +279,7 @@ template<std::size_t Size>
              < PositionHistory::INITIAL_RESERVE
         || history.current_key() != KEY_A
         || history.current_count() != 1
+        || history.has_repeated_position()
         || history.is_twofold()
         || history.is_threefold())
         return false;
@@ -160,6 +290,7 @@ template<std::size_t Size>
     history.push(KEY_A);
     if (history.count(KEY_A) != 2
         || history.current_count() != 2
+        || !history.has_repeated_position()
         || !history.is_twofold()
         || history.is_threefold())
         return false;
@@ -200,12 +331,45 @@ template<std::size_t Size>
         && history.current_key() == KEY_E
         && history.current_count() == 1
         && history.count(KEY_A) == 0
+        && !history.has_repeated_position()
         && !history.is_twofold()
         && !history.is_threefold();
 }
 
+[[nodiscard]] constexpr bool constexpr_boundary_smoke() {
+    PositionHistory history{KEY_A};
+    history.push(KEY_B);
+    history.push(KEY_A);
+    const HistoryContext outer_context =
+      history.context();
+
+    history.push_irreversible(KEY_A);
+    if (history.size() != 4
+        || history.current_count() != 1
+        || history.count(KEY_B) != 0
+        || history.has_repeated_position()
+        || history.context().length != 1)
+        return false;
+
+    history.push(KEY_B);
+    history.push(KEY_A);
+    if (history.current_count() != 2
+        || !history.has_repeated_position())
+        return false;
+
+    history.pop(KEY_A);
+    history.pop(KEY_B);
+    history.pop(KEY_A);
+    return history.size() == 3
+        && history.current_key() == KEY_A
+        && history.current_count() == 2
+        && history.has_repeated_position()
+        && history.context() == outer_context;
+}
+
 static_assert(PositionHistory::INITIAL_RESERVE > 0);
 static_assert(constexpr_history_smoke());
+static_assert(constexpr_boundary_smoke());
 static_assert(std::is_copy_constructible_v<PositionHistory>);
 static_assert(std::is_copy_assignable_v<PositionHistory>);
 static_assert(std::is_nothrow_move_constructible_v<PositionHistory>);
@@ -227,12 +391,18 @@ static_assert(noexcept(
 static_assert(noexcept(
   std::declval<const PositionHistory&>().is_threefold()));
 static_assert(noexcept(
+  std::declval<const PositionHistory&>()
+    .has_repeated_position()));
+static_assert(noexcept(
   std::declval<PositionHistory&>().pop(KEY_A)));
 static_assert(!noexcept(PositionHistory{KEY_A}));
 static_assert(!noexcept(
   std::declval<PositionHistory&>().reset(KEY_A)));
 static_assert(!noexcept(
   std::declval<PositionHistory&>().push(KEY_A)));
+static_assert(!noexcept(
+  std::declval<PositionHistory&>()
+    .push_irreversible(KEY_A)));
 
 void test_history_context() {
     PositionHistory first{KEY_A};
@@ -309,6 +479,8 @@ void test_seed_reset_and_thresholds() {
            "one occurrence is not twofold");
     expect(!history.is_threefold(),
            "one occurrence is not threefold");
+    expect(!history.has_repeated_position(),
+           "a fresh history contains no duplicated position");
 
     history.push(KEY_B);
     history.push(KEY_C);
@@ -327,6 +499,8 @@ void test_seed_reset_and_thresholds() {
            "two current occurrences are twofold");
     expect(!history.is_threefold(),
            "two current occurrences are not threefold");
+    expect(history.has_repeated_position(),
+           "a twofold current position marks the history repeated");
 
     history.push(KEY_B);
     history.push(KEY_C);
@@ -359,6 +533,264 @@ void test_seed_reset_and_thresholds() {
     expect(!history.is_twofold()
              && !history.is_threefold(),
            "a reset history is not repeated");
+    expect(!history.has_repeated_position(),
+           "reset clears repetitions outside the current position");
+}
+
+void test_any_repeated_position_tracking() {
+    PositionHistory history{KEY_A};
+    history.push(KEY_B);
+    history.push(KEY_A);
+    history.push(KEY_C);
+
+    expect(history.current_key() == KEY_C
+             && history.current_count() == 1,
+           "the current position can remain unique after an earlier repetition");
+    expect(history.has_repeated_position(),
+           "an earlier duplicated position remains visible at a unique current key");
+
+    history.pop(KEY_C);
+    history.pop(KEY_A);
+    expect(!history.has_repeated_position(),
+           "removing the second occurrence clears the repetition flag");
+
+    history.push(KEY_B);
+    history.push(KEY_C);
+    history.push(KEY_A);
+    expect(history.count(KEY_A) == 2
+             && history.count(KEY_B) == 2
+             && history.has_repeated_position(),
+           "the flag covers multiple independently repeated keys");
+
+    history.pop(KEY_A);
+    expect(history.has_repeated_position(),
+           "removing one repeated key retains the flag for another");
+    history.pop(KEY_C);
+    history.pop(KEY_B);
+    expect(!history.has_repeated_position(),
+           "the flag clears after every duplicated key is unwound");
+
+    history.push(KEY_A);
+    const PositionHistory copied{history};
+    expect(copied.has_repeated_position(),
+           "copy construction preserves the all-history repetition flag");
+
+    PositionHistory assigned{KEY_E};
+    assigned = history;
+    expect(assigned.has_repeated_position(),
+           "copy assignment preserves the all-history repetition flag");
+
+    assigned.reset(KEY_D);
+    expect(!assigned.has_repeated_position(),
+           "reset clears a copied all-history repetition flag");
+}
+
+void test_irreversible_boundaries() {
+    PositionHistory history{KEY_A};
+    history.push(KEY_B);
+    history.push(KEY_A);
+    history.push(KEY_C);
+
+    const std::size_t outer_size = history.size();
+    const HistoryContext outer_context =
+      history.context();
+    expect(history.has_repeated_position(),
+           "the outer segment starts with a repeated position");
+
+    history.push_irreversible(KEY_A);
+    expect(history.size() == outer_size + 1,
+           "an irreversible push remains on the traversal stack");
+    expect(history.current_key() == KEY_A
+             && history.current_count() == 1,
+           "an irreversible push seeds a fresh repetition segment");
+    expect(history.count(KEY_B) == 0
+             && !history.has_repeated_position(),
+           "the fresh segment excludes every earlier occurrence");
+
+    const PositionHistory single_key{KEY_A};
+    expect(history.context() == single_key.context(),
+           "the fresh segment resets the transposition history context");
+
+    history.push(KEY_B);
+    history.push(KEY_A);
+    const HistoryContext first_segment_context =
+      history.context();
+    expect(history.current_count() == 2
+             && history.has_repeated_position(),
+           "repetitions after a boundary remain detectable");
+
+    history.push_irreversible(KEY_B);
+    history.push(KEY_B);
+    expect(history.current_count() == 2
+             && history.count(KEY_A) == 0
+             && history.has_repeated_position(),
+           "a nested boundary owns an independent occurrence segment");
+
+    history.pop(KEY_B);
+    expect(!history.has_repeated_position(),
+           "removing a nested duplicate updates only its active segment");
+    history.pop(KEY_B);
+    expect(history.current_key() == KEY_A
+             && history.current_count() == 2
+             && history.has_repeated_position(),
+           "popping a nested boundary restores the preceding counts");
+    expect(history.context() == first_segment_context,
+           "popping a nested boundary restores its exact context");
+
+    PositionHistory copied{history};
+    copied.push_irreversible(KEY_D);
+    copied.pop(KEY_D);
+    expect(copied.context() == history.context()
+             && copied.current_count()
+                  == history.current_count(),
+           "a copied history restores boundaries independently");
+
+    history.pop(KEY_A);
+    history.pop(KEY_B);
+    history.pop(KEY_A);
+    expect(history.size() == outer_size
+             && history.current_key() == KEY_C,
+           "popping an outer boundary restores the complete traversal stack");
+    expect(history.count(KEY_A) == 2
+             && history.has_repeated_position(),
+           "popping an outer boundary restores earlier occurrences");
+    expect(history.context() == outer_context,
+           "popping an outer boundary restores the earlier context exactly");
+
+    history.push_irreversible(KEY_E);
+    history.reset(KEY_D);
+    expect(history.size() == 1
+             && history.current_key() == KEY_D
+             && history.current_count() == 1
+             && !history.has_repeated_position(),
+           "reset discards active boundary restoration state");
+}
+
+void test_occurrence_transitions_across_boundaries() {
+    PositionHistory history{KEY_A};
+    history.push(KEY_A);
+    history.push(KEY_A);
+    expect(history.current_count() == 3
+             && history.has_repeated_position(),
+           "a third occurrence retains one repeated-position class");
+
+    history.pop(KEY_A);
+    expect(history.current_count() == 2
+             && history.has_repeated_position(),
+           "removing a third occurrence retains the underlying duplicate");
+    history.pop(KEY_A);
+    expect(history.current_count() == 1
+             && !history.has_repeated_position(),
+           "removing a second occurrence clears its repeated-position class");
+
+    history.push(KEY_B);
+    history.push(KEY_A);
+    history.push(KEY_B);
+    expect(history.current_count() == 2
+             && history.count(KEY_A) == 2
+             && history.has_repeated_position(),
+           "interleaved duplicate classes are counted independently");
+    const HistoryContext outer_context = history.context();
+
+    history.push_irreversible(KEY_B);
+    history.push(KEY_B);
+    history.push(KEY_A);
+    history.push(KEY_A);
+    expect(history.current_count() == 2
+             && history.count(KEY_B) == 2
+             && history.has_repeated_position(),
+           "a nested segment tracks multiple duplicate classes locally");
+
+    history.pop(KEY_A);
+    history.pop(KEY_A);
+    expect(history.count(KEY_B) == 2
+             && history.has_repeated_position(),
+           "unwinding one nested duplicate retains another duplicate class");
+    history.pop(KEY_B);
+    history.pop(KEY_B);
+    expect(history.current_key() == KEY_B
+             && history.current_count() == 2
+             && history.count(KEY_A) == 2
+             && history.has_repeated_position()
+             && history.context() == outer_context,
+           "popping a nested boundary restores every outer occurrence state");
+}
+
+void test_randomized_history_differential() {
+    constexpr std::array<PositionKey, 7> KEY_POOL = {
+      KEY_A,
+      KEY_B,
+      KEY_C,
+      KEY_D,
+      KEY_E,
+      0xABCDEF0123456789ULL,
+      0xFEDCBA9876543210ULL,
+    };
+    constexpr std::size_t OPERATION_NB = 20000;
+
+    std::uint64_t random_state =
+      0xD1B54A32D192ED03ULL;
+    const auto next_random = [&random_state]() noexcept {
+        random_state ^= random_state >> 12;
+        random_state ^= random_state << 25;
+        random_state ^= random_state >> 27;
+        return random_state
+             * 0x2545F4914F6CDD1DULL;
+    };
+
+    PositionHistory history{KEY_A};
+    ReferenceHistory reference{KEY_A};
+    bool consistent = true;
+
+    for (std::size_t operation = 0;
+         operation < OPERATION_NB;
+         ++operation) {
+        const std::uint64_t selector = next_random();
+        const std::uint64_t action = selector % 100;
+
+        if (action < 55 || history.size() == 1) {
+            PositionKey key =
+              KEY_POOL[static_cast<std::size_t>(
+                next_random() % KEY_POOL.size())];
+            if ((selector & 3U) == 0)
+                key ^= next_random();
+
+            const bool irreversible =
+              next_random() % 7 == 0;
+            if (irreversible)
+                history.push_irreversible(key);
+            else
+                history.push(key);
+            reference.push(key, irreversible);
+        } else if (action < 85) {
+            history.pop(history.current_key());
+            reference.pop();
+        } else if (action < 93) {
+            const PositionKey key =
+              KEY_POOL[static_cast<std::size_t>(
+                next_random() % KEY_POOL.size())];
+            history.reset(key);
+            reference.reset(key);
+        } else {
+            const PositionHistory copied{history};
+            PositionHistory assigned{KEY_E};
+            assigned = history;
+            if (!histories_equal(copied, reference)
+                || !histories_equal(assigned, reference)) {
+                consistent = false;
+                break;
+            }
+        }
+
+        if (!histories_equal(history, reference)) {
+            consistent = false;
+            break;
+        }
+    }
+
+    expect(
+      consistent,
+      "randomized pushes, pops, boundaries, resets, and copies match a direct active-segment oracle");
 }
 
 void test_growth_and_full_unwind() {
@@ -400,6 +832,8 @@ void test_growth_and_full_unwind() {
     expect(
       history.count(FIRST_GROWN_KEY) == 1,
       "growth preserves the first appended key");
+    expect(!history.has_repeated_position(),
+           "growth across distinct keys does not create a repetition");
 
     for (std::size_t remaining = push_count;
          remaining > 0;
@@ -418,6 +852,8 @@ void test_growth_and_full_unwind() {
            "unwinding grown storage restores the seed");
     expect(history.current_count() == 1,
            "the restored seed occurs once");
+    expect(!history.has_repeated_position(),
+           "full unwind clears the grown history repetition flag");
     expect(history.capacity() == grown_capacity,
            "popping entries retains grown storage");
 
@@ -804,6 +1240,10 @@ void test_generation_and_perft_noninterference() {
 int main() {
     test_history_context();
     test_seed_reset_and_thresholds();
+    test_any_repeated_position_tracking();
+    test_irreversible_boundaries();
+    test_occurrence_transitions_across_boundaries();
+    test_randomized_history_differential();
     test_growth_and_full_unwind();
     test_copying_and_branching();
     test_grown_history_copying();

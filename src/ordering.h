@@ -5,6 +5,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <limits>
+#include <vector>
 
 #include "exchange.h"
 #include "movelist.h"
@@ -19,6 +20,10 @@ namespace OrderingDetail {
 inline constexpr MoveOrderScore QUIET_SCORE = 0;
 inline constexpr MoveOrderScore CAPTURE_BASE = 1;
 using WideMoveOrderScore = std::uint64_t;
+
+// Higher composite keys are searched first. Quiet history occupies the low
+// range, while every tactical material score occupies the disjoint high range.
+using MoveOrderKey = std::uint32_t;
 
 // An en-passant move can capture a queen on its destination and a pawn on the
 // vulnerable pawn square.
@@ -396,31 +401,188 @@ class KillerMoves {
     std::array<Move, SLOT_NB> moves_{};
 };
 
-// MoveOrderingBuffer stores merge-sort output between passes. One buffer can
-// be reused after each completed order_moves() call.
+// MoveOrderingBuffer stores merge-sort output and precomputed ordering keys
+// between passes. One buffer can be reused after each completed order_moves()
+// call.
 class MoveOrderingBuffer {
   public:
     constexpr MoveOrderingBuffer() noexcept = default;
 
-    // Precondition: index is less than MoveList::capacity().
-    [[nodiscard]] constexpr Move& operator[](
-      std::size_t index) noexcept {
-        assert(index < moves_.size());
-        return moves_[index];
+    // Selects inline storage for common lists and sizes overflow storage only
+    // when the caller supplies a larger list.
+    constexpr void prepare(std::size_t size) {
+        assert(size <= MoveList::CAPACITY);
+        size_ = size;
+        if (size <= MoveList::INLINE_CAPACITY) {
+            overflow_.clear();
+            move_list_key_overflow_.clear();
+            buffer_key_overflow_.clear();
+            spilled_ = false;
+            return;
+        }
+
+        overflow_.resize(size);
+        move_list_key_overflow_.resize(size);
+        buffer_key_overflow_.resize(size);
+        spilled_ = true;
     }
 
-    // Precondition: index is less than MoveList::capacity().
+    // Precondition: prepare() was called and index is less than its size.
+    [[nodiscard]] constexpr Move& operator[](
+      std::size_t index) noexcept {
+        assert(index < size_);
+        return spilled_
+          ? overflow_[index]
+          : inline_moves_[index];
+    }
+
+    // Precondition: prepare() was called and index is less than its size.
     [[nodiscard]] constexpr const Move& operator[](
       std::size_t index) const noexcept {
-        assert(index < moves_.size());
-        return moves_[index];
+        assert(index < size_);
+        return spilled_
+          ? overflow_[index]
+          : inline_moves_[index];
+    }
+
+    // Keys aligned with the caller's MoveList are kept separately from keys
+    // aligned with this buffer while merge passes alternate their source.
+    [[nodiscard]] constexpr OrderingDetail::MoveOrderKey&
+    move_list_key(std::size_t index) noexcept {
+        assert(index < size_);
+        return spilled_
+          ? move_list_key_overflow_[index]
+          : move_list_keys_[index];
+    }
+
+    [[nodiscard]] constexpr const OrderingDetail::MoveOrderKey&
+    move_list_key(std::size_t index) const noexcept {
+        assert(index < size_);
+        return spilled_
+          ? move_list_key_overflow_[index]
+          : move_list_keys_[index];
+    }
+
+    [[nodiscard]] constexpr OrderingDetail::MoveOrderKey&
+    buffer_key(std::size_t index) noexcept {
+        assert(index < size_);
+        return spilled_
+          ? buffer_key_overflow_[index]
+          : buffer_keys_[index];
+    }
+
+    [[nodiscard]] constexpr const OrderingDetail::MoveOrderKey&
+    buffer_key(std::size_t index) const noexcept {
+        assert(index < size_);
+        return spilled_
+          ? buffer_key_overflow_[index]
+          : buffer_keys_[index];
     }
 
   private:
-    std::array<Move, MoveList::CAPACITY> moves_{};
+    std::array<Move, MoveList::INLINE_CAPACITY> inline_moves_{};
+    std::array<
+      OrderingDetail::MoveOrderKey,
+      MoveList::INLINE_CAPACITY>
+      move_list_keys_{};
+    std::array<
+      OrderingDetail::MoveOrderKey,
+      MoveList::INLINE_CAPACITY>
+      buffer_keys_{};
+    std::vector<Move> overflow_;
+    std::vector<OrderingDetail::MoveOrderKey>
+      move_list_key_overflow_;
+    std::vector<OrderingDetail::MoveOrderKey>
+      buffer_key_overflow_;
+    std::size_t size_ = 0;
+    bool spilled_ = false;
+};
+
+// Describes the proven-losing suffix created by zero-threshold exchange
+// ordering. The preferred-move index records the stable rotation applied to
+// the final list.
+class OrderingExchangeBands {
+  public:
+    constexpr void reset() noexcept {
+        size_ = 0;
+        losing_begin_ = 0;
+        promoted_index_ = 0;
+        classified_ = false;
+    }
+
+    constexpr void set(
+      std::size_t size,
+      std::size_t losing_begin,
+      std::size_t promoted_index) noexcept {
+        assert(losing_begin <= size);
+        assert(promoted_index <= size);
+        size_ = size;
+        losing_begin_ = losing_begin;
+        promoted_index_ = promoted_index;
+        classified_ = true;
+    }
+
+    // Precondition: final_index addresses the ordered list described by the
+    // most recent set() call.
+    [[nodiscard]] constexpr bool proven_below_zero(
+      std::size_t final_index) const noexcept {
+        assert(!classified_ || final_index < size_);
+        if (!classified_)
+            return false;
+
+        std::size_t original_index = final_index;
+        if (promoted_index_ < size_) {
+            if (final_index == 0)
+                original_index = promoted_index_;
+            else if (final_index <= promoted_index_)
+                original_index = final_index - 1;
+        }
+
+        return original_index >= losing_begin_;
+    }
+
+  private:
+    std::size_t size_ = 0;
+    std::size_t losing_begin_ = 0;
+    std::size_t promoted_index_ = 0;
+    bool classified_ = false;
 };
 
 namespace OrderingDetail {
+
+inline constexpr MoveOrderKey TACTICAL_KEY_BASE =
+  static_cast<MoveOrderKey>(2 * QuietHistory::LIMIT + 1);
+
+static_assert(
+  static_cast<WideMoveOrderScore>(TACTICAL_KEY_BASE)
+      + KING_CAPTURE_SCORE_WIDE
+    <= std::numeric_limits<MoveOrderKey>::max());
+
+[[nodiscard]] constexpr MoveOrderKey make_move_order_key(
+  const Position& position,
+  Move move,
+  const QuietHistory* history) noexcept {
+    const MoveOrderScore material =
+      move_order_score(position, move);
+    if (material != QUIET_SCORE)
+        return TACTICAL_KEY_BASE + material;
+
+    const HistoryScore quiet_history = history
+      ? history->score(
+          position.piece_on(move.from()),
+          move.to())
+      : HistoryScore{0};
+    assert(quiet_history >= -QuietHistory::LIMIT);
+    assert(quiet_history <= QuietHistory::LIMIT);
+    return static_cast<MoveOrderKey>(
+      quiet_history + QuietHistory::LIMIT);
+}
+
+[[nodiscard]] constexpr bool key_precedes(
+  const MoveOrderKey& candidate,
+  const MoveOrderKey& current) noexcept {
+    return candidate > current;
+}
 
 [[nodiscard]] constexpr bool contains_move(
   const MoveList& moves,
@@ -443,25 +605,36 @@ namespace OrderingDetail {
         : buffer[index];
 }
 
-constexpr void write_move(
+[[nodiscard]] constexpr const MoveOrderKey& source_key(
+  const MoveOrderingBuffer& buffer,
+  bool source_is_move_list,
+  std::size_t index) noexcept {
+    return source_is_move_list
+        ? buffer.move_list_key(index)
+        : buffer.buffer_key(index);
+}
+
+constexpr void write_entry(
   MoveList& moves,
   MoveOrderingBuffer& buffer,
   bool destination_is_move_list,
   std::size_t index,
-  Move move) noexcept {
-    if (destination_is_move_list)
+  Move move,
+  MoveOrderKey key) noexcept {
+    if (destination_is_move_list) {
         moves[index] = move;
-    else
+        buffer.move_list_key(index) = key;
+    } else {
         buffer[index] = move;
+        buffer.buffer_key(index) = key;
+    }
 }
 
 // Merges adjacent sorted ranges of width elements. Equal scores are taken
 // from the left range first, preserving their existing order.
 constexpr void merge_pass(
-  const Position& position,
   MoveList& moves,
   MoveOrderingBuffer& buffer,
-  const QuietHistory* history,
   std::size_t width,
   bool source_is_move_list) noexcept {
     const std::size_t size = moves.size();
@@ -496,37 +669,26 @@ constexpr void merge_pass(
                 buffer,
                 source_is_move_list,
                 right);
-            const MoveOrderScore left_material =
-              move_order_score(
-                position, left_move);
-            const MoveOrderScore right_material =
-              move_order_score(
-                position, right_move);
+            const MoveOrderKey left_key =
+              source_key(
+                buffer,
+                source_is_move_list,
+                left);
+            const MoveOrderKey right_key =
+              source_key(
+                buffer,
+                source_is_move_list,
+                right);
+            const bool take_right =
+              key_precedes(right_key, left_key);
 
-            bool take_right =
-              right_material > left_material;
-            if (right_material == left_material
-                && right_material == QUIET_SCORE
-                && history) {
-                const Piece left_piece =
-                  position.piece_on(
-                    left_move.from());
-                const Piece right_piece =
-                  position.piece_on(
-                    right_move.from());
-                take_right =
-                  history->score(
-                    right_piece, right_move.to())
-                  > history->score(
-                      left_piece, left_move.to());
-            }
-
-            write_move(
+            write_entry(
               moves,
               buffer,
               !source_is_move_list,
               output,
-              take_right ? right_move : left_move);
+              take_right ? right_move : left_move,
+              take_right ? right_key : left_key);
 
             if (take_right)
                 ++right;
@@ -536,7 +698,7 @@ constexpr void merge_pass(
         }
 
         while (left < middle) {
-            write_move(
+            write_entry(
               moves,
               buffer,
               !source_is_move_list,
@@ -545,11 +707,16 @@ constexpr void merge_pass(
                 moves,
                 buffer,
                 source_is_move_list,
-                left++));
+                left),
+              source_key(
+                buffer,
+                source_is_move_list,
+                left));
+            ++left;
         }
 
         while (right < end) {
-            write_move(
+            write_entry(
               moves,
               buffer,
               !source_is_move_list,
@@ -558,20 +725,25 @@ constexpr void merge_pass(
                 moves,
                 buffer,
                 source_is_move_list,
-                right++));
+                right),
+              source_key(
+                buffer,
+                source_is_move_list,
+                right));
+            ++right;
         }
     }
 }
 
 // Moves one matching entry to begin and preserves the relative order of all
 // other entries. Searches beginning at begin cannot move an earlier entry.
-constexpr void promote_move(
+[[nodiscard]] constexpr std::size_t promote_move(
   MoveList& moves,
   std::size_t begin,
   Move promoted) noexcept {
     if (!promoted.is_board_move()
         || begin >= moves.size()) {
-        return;
+        return moves.size();
     }
 
     std::size_t promoted_index = begin;
@@ -580,7 +752,7 @@ constexpr void promote_move(
         ++promoted_index;
 
     if (promoted_index == moves.size())
-        return;
+        return moves.size();
 
     for (std::size_t index = promoted_index;
          index > begin;
@@ -588,6 +760,7 @@ constexpr void promote_move(
         moves[index] = moves[index - 1];
 
     moves[begin] = promoted;
+    return promoted_index;
 }
 
 // Places present killer moves at the front of the range and preserves the
@@ -649,10 +822,11 @@ struct MoveBands {
     std::size_t quiet_end = 0;
 };
 
-// Moves non-losing tactical entries before quiet entries and losing tactical
-// entries after them. Relative order within all three ranges is preserved.
-// The input has already been sorted with every tactical entry before every
-// quiet entry.
+// Moves non-losing or unclassified tactical entries before quiet entries and
+// proven losing tactical entries after them. A single bounded exchange budget
+// is shared across the list. Relative order within all three ranges is
+// preserved. The input has already been sorted with every tactical entry
+// before every quiet entry.
 [[nodiscard]] constexpr MoveBands partition_exchange_bands(
   const Position& position,
   MoveList& moves,
@@ -666,12 +840,17 @@ struct MoveBands {
 
     std::size_t non_losing_count = 0;
     std::size_t losing_count = 0;
+    std::size_t remaining_exchange_nodes =
+      MAX_ORDERING_EXCHANGE_NODES;
     for (std::size_t index = 0;
          index < tactical_end;
         ++index) {
         const Move move = moves[index];
-        if (static_exchange_is_not_proven_losing(
-              position, move)) {
+        if (bounded_static_exchange_is_not_proven_below(
+              position,
+              move,
+              0,
+              remaining_exchange_nodes)) {
             moves[non_losing_count++] = move;
         } else {
             buffer[losing_count++] = move;
@@ -704,22 +883,33 @@ constexpr void order_moves_impl(
   MoveOrderingBuffer& buffer,
   const QuietHistory* history,
   const KillerMoves* killers,
-  Move preferred = Move::none()) noexcept {
+  Move preferred,
+  OrderingExchangeBands* exchange_bands) noexcept {
+    if (exchange_bands)
+        exchange_bands->reset();
+
+    buffer.prepare(moves.size());
     MoveBands bands{
       0,
       moves.size(),
     };
 
     if (moves.size() >= 2) {
+        for (std::size_t index = 0;
+             index < moves.size();
+             ++index) {
+            buffer.move_list_key(index) =
+              make_move_order_key(
+                position, moves[index], history);
+        }
+
         bool source_is_move_list = true;
         std::size_t width = 1;
 
         while (width < moves.size()) {
             OrderingDetail::merge_pass(
-              position,
               moves,
               buffer,
-              history,
               width,
               source_is_move_list);
             source_is_move_list =
@@ -753,7 +943,14 @@ constexpr void order_moves_impl(
           *killers);
     }
 
-    promote_move(moves, 0, preferred);
+    const std::size_t promoted_index =
+      promote_move(moves, 0, preferred);
+    if (exchange_bands && moves.size() >= 2) {
+        exchange_bands->set(
+          moves.size(),
+          bands.quiet_end,
+          promoted_index);
+    }
 }
 
 }  // namespace OrderingDetail
@@ -762,8 +959,8 @@ constexpr void order_moves_impl(
 // primary and secondary killer moves, then other quiet moves by descending
 // history score, and finally losing tactical moves. Equal scores retain their
 // existing order. A preferred move contained in the list is placed first
-// after sorting. The position is unchanged and no dynamic allocation is
-// performed.
+// after sorting. The position is unchanged. Lists no larger than
+// MoveList::INLINE_CAPACITY use no dynamic allocation.
 // Preconditions:
 // - every entry in moves is legal and was generated for position;
 // - position contains exactly one king of each color;
@@ -781,7 +978,28 @@ constexpr void order_moves(
       buffer,
       &history,
       &killers,
-      preferred);
+      preferred,
+      nullptr);
+}
+
+// This overload also exposes the proven-losing exchange band to selective
+// search at the same node.
+constexpr void order_moves(
+  const Position& position,
+  MoveList& moves,
+  MoveOrderingBuffer& buffer,
+  const QuietHistory& history,
+  const KillerMoves& killers,
+  Move preferred,
+  OrderingExchangeBands& exchange_bands) noexcept {
+    OrderingDetail::order_moves_impl(
+      position,
+      moves,
+      buffer,
+      &history,
+      &killers,
+      preferred,
+      &exchange_bands);
 }
 
 // This overload applies quiet history without killer moves. Its position and
@@ -798,7 +1016,27 @@ constexpr void order_moves(
       buffer,
       &history,
       nullptr,
-      preferred);
+      preferred,
+      nullptr);
+}
+
+// This overload exposes the proven-losing exchange band to selective search
+// at the same node.
+constexpr void order_moves(
+  const Position& position,
+  MoveList& moves,
+  MoveOrderingBuffer& buffer,
+  const QuietHistory& history,
+  Move preferred,
+  OrderingExchangeBands& exchange_bands) noexcept {
+    OrderingDetail::order_moves_impl(
+      position,
+      moves,
+      buffer,
+      &history,
+      nullptr,
+      preferred,
+      &exchange_bands);
 }
 
 // This overload preserves stable generation order among quiet moves. Its
@@ -814,7 +1052,8 @@ constexpr void order_moves(
       buffer,
       nullptr,
       nullptr,
-      preferred);
+      preferred,
+      nullptr);
 }
 
 // This overload owns its temporary merge-sort buffer. Its position and

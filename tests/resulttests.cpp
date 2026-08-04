@@ -271,6 +271,29 @@ void expect_classifiers(
       positions_equal(position, original),
       "has_legal_move restores every position field");
 
+    const Detail::KingLayout layout =
+      Detail::king_layout(position);
+    const bool checked =
+      layout == Detail::KingLayout::COMPLETE
+      && in_check(position);
+    const PositionResult boundary_result =
+      Detail::classify_result(
+        position, history, generated_legal_move);
+    const PositionResult fact_result =
+      Detail::classify_result_with_facts(
+        position,
+        history,
+        layout,
+        generated_legal_move,
+        checked);
+    expect(
+      fact_result == boundary_result
+        && fact_result == expected_result,
+      "fact-based classification matches the validated classifier");
+    expect(
+      positions_equal(position, original),
+      "fact-based classification leaves the position unchanged");
+
     expect(
       terminal_result(position, history, legal_moves)
         == expected_result,

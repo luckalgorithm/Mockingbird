@@ -8,6 +8,7 @@
 
 #include "bitboard.h"
 #include "board.h"
+#include "evalstate.h"
 #include "zobrist.h"
 
 namespace Mockingbird {
@@ -56,6 +57,31 @@ class Position {
 
     [[nodiscard]] constexpr PositionKey key() const noexcept {
         return key_;
+    }
+
+    [[nodiscard]] constexpr const StaticEvaluationState&
+    static_evaluation_state() const noexcept {
+        return static_evaluation_state_;
+    }
+
+    // Reconstructs the board-local evaluation terms from the mailbox.
+    [[nodiscard]] constexpr StaticEvaluationState
+    recompute_static_evaluation_state() const noexcept {
+        StaticEvaluationState result;
+
+        for (int square_index = 0;
+             square_index < SQUARE_NB;
+             ++square_index) {
+            const Square square = Square(square_index);
+            if (!is_ok(square))
+                continue;
+
+            const Piece piece = piece_on(square);
+            if (piece != NO_PIECE)
+                result.add_piece(piece, square);
+        }
+
+        return result;
     }
 
     // Reconstructs the key from the position's canonical state.
@@ -221,6 +247,7 @@ class Position {
         by_color_[std::size_t(color_of(piece))].set(square);
         by_type_[std::size_t(type_of(piece))].set(square);
         key_ ^= Zobrist::piece(piece, square);
+        static_evaluation_state_.add_piece(piece, square);
     }
 
     // Preconditions: square is playable and contains a piece.
@@ -232,6 +259,7 @@ class Position {
         by_color_[std::size_t(color_of(removed))].clear(square);
         by_type_[std::size_t(type_of(removed))].clear(square);
         key_ ^= Zobrist::piece(removed, square);
+        static_evaluation_state_.remove_piece(removed, square);
 
         return removed;
     }
@@ -264,6 +292,8 @@ class Position {
 
         key_ ^= Zobrist::piece(moving, from)
               ^ Zobrist::piece(moving, to);
+        static_evaluation_state_.relocate_piece(
+          moving, from, to);
 
         return captured;
     }
@@ -286,6 +316,7 @@ class Position {
         key_ =
           Zobrist::side(RED)
           ^ Zobrist::castling(0);
+        static_evaluation_state_ = {};
     }
 
   private:
@@ -348,6 +379,7 @@ class Position {
     std::array<Bitboard, PIECE_TYPE_NB> by_type_{};
     std::array<Square, COLOR_NB> en_passant_squares_{};
     PositionKey key_;
+    StaticEvaluationState static_evaluation_state_;
     std::uint8_t castling_rights_ = 0;
     Color side_to_move_ = RED;
 };
@@ -363,5 +395,8 @@ static_assert(Position{}.en_passant_square(BLUE) == SQ_NONE);
 static_assert(Position{}.en_passant_square(YELLOW) == SQ_NONE);
 static_assert(Position{}.en_passant_square(GREEN) == SQ_NONE);
 static_assert(Position{}.key() == Position{}.recompute_key());
+static_assert(
+  Position{}.static_evaluation_state()
+  == Position{}.recompute_static_evaluation_state());
 
 }  // namespace Mockingbird

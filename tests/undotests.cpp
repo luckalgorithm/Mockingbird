@@ -42,6 +42,8 @@ void expect(bool condition, std::string_view message) {
 
     if (left.side_to_move() != right.side_to_move()
         || left.key() != right.key()
+        || left.static_evaluation_state()
+             != right.static_evaluation_state()
         || left.occupied() != right.occupied())
         return false;
 
@@ -95,6 +97,10 @@ void expect_consistent(const Mockingbird::Position& position) {
 
     expect(position.key() == position.recompute_key(),
            "cached key matches the canonical position state");
+    expect(
+      position.static_evaluation_state()
+        == position.recompute_static_evaluation_state(),
+      "incremental evaluation state matches the mailbox");
 
     Bitboard occupied;
     std::array<Bitboard, COLOR_NB> by_color{};
@@ -267,6 +273,107 @@ void expect_castling_rights(
 }
 
 static_assert(constexpr_do_and_undo());
+
+void test_repetition_irreversibility() {
+    using namespace Mockingbird;
+
+    constexpr Square source =
+      make_square(FILE_H, RANK_8);
+    constexpr Square destination =
+      make_square(FILE_F, RANK_7);
+
+    Position quiet;
+    quiet.put_piece(R_KNIGHT, source);
+    expect(
+      !is_repetition_irreversible(
+        quiet, Move::normal(source, destination)),
+      "a quiet non-pawn move with unchanged rule state is reversible");
+
+    Position pawn;
+    pawn.put_piece(
+      R_PAWN, make_square(FILE_D, RANK_2));
+    expect(
+      is_repetition_irreversible(
+        pawn,
+        Move::normal(
+          make_square(FILE_D, RANK_2),
+          make_square(FILE_D, RANK_3))),
+      "every pawn move is repetition-irreversible");
+
+    Position capture = quiet;
+    capture.put_piece(B_BISHOP, destination);
+    expect(
+      is_repetition_irreversible(
+        capture, Move::normal(source, destination)),
+      "every capture is repetition-irreversible");
+
+    Position en_passant;
+    constexpr Square pawn_source =
+      make_square(FILE_D, RANK_4);
+    constexpr Square en_passant_target =
+      make_square(FILE_E, RANK_5);
+    en_passant.put_piece(R_PAWN, pawn_source);
+    expect(
+      is_repetition_irreversible(
+        en_passant,
+        Move::en_passant(
+          pawn_source, en_passant_target)),
+      "an en-passant move is repetition-irreversible");
+
+    const CastlingGeometry& geometry =
+      castling_geometry(
+        RED, CastlingSide::KING_SIDE);
+    Position rook_move;
+    rook_move.put_piece(
+      R_ROOK, geometry.rook_source);
+    rook_move.set_castling_right(
+      RED, CastlingSide::KING_SIDE);
+    expect(
+      is_repetition_irreversible(
+        rook_move,
+        Move::normal(
+          geometry.rook_source,
+          geometry.rook_destination)),
+      "a move that removes an active castling right is irreversible");
+
+    Position king_move;
+    king_move.put_piece(
+      R_KING, geometry.king_source);
+    king_move.set_castling_right(
+      RED, CastlingSide::KING_SIDE);
+    expect(
+      is_repetition_irreversible(
+        king_move,
+        Move::normal(
+          geometry.king_source,
+          geometry.king_transit)),
+      "a king move that removes an active castling right is irreversible");
+    expect(
+      is_repetition_irreversible(
+        king_move,
+        Move::castling(
+          geometry.king_source,
+          geometry.king_destination)),
+      "castling is repetition-irreversible while its right is active");
+
+    Position expired_target = quiet;
+    expired_target.set_en_passant_square(
+      RED, make_square(FILE_E, RANK_3));
+    expect(
+      is_repetition_irreversible(
+        expired_target,
+        Move::normal(source, destination)),
+      "a move that expires its color's en-passant state is irreversible");
+
+    Position preserved_target = quiet;
+    preserved_target.set_en_passant_square(
+      BLUE, make_square(FILE_C, RANK_6));
+    expect(
+      !is_repetition_irreversible(
+        preserved_target,
+        Move::normal(source, destination)),
+      "a quiet move preserves another color's unrelated en-passant state");
+}
 
 void test_undo_state_layout() {
     using namespace Mockingbird;
@@ -1150,6 +1257,7 @@ void test_four_player_state_sequence() {
 }  // namespace
 
 int main() {
+    test_repetition_irreversibility();
     test_undo_state_layout();
     test_normal_moves_and_captures();
     test_pawn_push_state();

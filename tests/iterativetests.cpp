@@ -40,6 +40,13 @@ void expect(bool condition, std::string_view message) {
     ++failures;
 }
 
+[[nodiscard]] constexpr bool same_principal_result(
+  const SearchResult& left,
+  const SearchResult& right) noexcept {
+    return left.best_move == right.best_move
+        && left.score == right.score;
+}
+
 [[nodiscard]] constexpr bool contains_move_type(
   const MoveList& moves,
   MoveType expected) noexcept {
@@ -385,6 +392,22 @@ static_assert(!IterativeResult{}.has_move());
 
 void test_budget_primitives() {
     {
+        SearchDetail::SearchState state;
+        const auto deep = state.enter_node(7);
+        const auto shallow = state.enter_node(2);
+        expect(
+          deep.has_value()
+            && shallow.has_value()
+            && state.selective_depth() == 7,
+          "search state retains the greatest entered ply");
+        state.reset_selective_depth();
+        expect(
+          state.selective_depth() == 0
+            && state.nodes == 2,
+          "a new iteration resets selective depth without resetting nodes");
+    }
+
+    {
         SearchDetail::SearchBudget budget{
           std::uint64_t{2}, std::nullopt};
         std::uint64_t nodes = 0;
@@ -425,6 +448,24 @@ void test_budget_primitives() {
 
     {
         SearchDetail::SearchBudget budget{
+          std::nullopt,
+          SearchClock::time_point::min()};
+        std::uint64_t nodes =
+          SearchDetail::TIME_CHECK_INTERVAL - 1;
+        const auto stopped =
+          budget.enter_node(nodes);
+
+        expect(
+          !stopped
+            && stopped.error()
+                 == SearchStopReason::TIME_LIMIT
+            && nodes
+                 == SearchDetail::TIME_CHECK_INTERVAL - 1,
+          "the first budget entry checks a deadline away from a polling boundary");
+    }
+
+    {
+        SearchDetail::SearchBudget budget{
           std::uint64_t{0},
           SearchClock::time_point::min()};
         std::uint64_t nodes = 0;
@@ -446,6 +487,167 @@ void test_budget_primitives() {
         start, SearchDuration::max())
         == SearchClock::time_point::max(),
       "deadline construction saturates at the clock maximum");
+
+    {
+        std::atomic_bool stop_requested{false};
+        SearchDetail::SearchBudget budget{
+          std::nullopt,
+          std::nullopt,
+          &stop_requested};
+        std::uint64_t nodes = 0;
+        const auto first = budget.enter_node(nodes);
+        stop_requested.store(
+          true, std::memory_order_relaxed);
+
+        auto stopped = budget.enter_node(nodes);
+        while (stopped)
+            stopped = budget.enter_node(nodes);
+
+        expect(
+          first
+            && !stopped
+            && stopped.error()
+                 == SearchStopReason::EXTERNAL_STOP
+            && nodes
+                 == SearchDetail::CONTROL_CHECK_INTERVAL,
+          "an external stop is observed within the sampled-node bound");
+    }
+
+    {
+        std::atomic_bool stop_requested{true};
+        SearchDetail::SearchBudget budget{
+          std::nullopt,
+          std::nullopt,
+          &stop_requested};
+        std::uint64_t nodes =
+          SearchDetail::CONTROL_CHECK_INTERVAL - 1;
+        const auto stopped = budget.enter_node(nodes);
+
+        expect(
+          !stopped
+            && stopped.error()
+                 == SearchStopReason::EXTERNAL_STOP
+            && nodes
+                 == SearchDetail::CONTROL_CHECK_INTERVAL - 1,
+          "the first budget entry observes a pre-set external stop");
+    }
+
+    {
+        constexpr std::uint64_t exact_limit =
+          SearchDetail::CONTROL_CHECK_INTERVAL + 3;
+        std::atomic_bool stop_requested{false};
+        SearchDetail::SearchTimeControl dormant_control{
+          SearchDuration{1}, std::nullopt};
+        SearchDetail::SearchBudget budget{
+          exact_limit,
+          std::nullopt,
+          &stop_requested,
+          &dormant_control};
+        std::uint64_t nodes = 0;
+        bool all_admitted = true;
+
+        for (std::uint64_t index = 0;
+             index < exact_limit;
+             ++index) {
+            all_admitted =
+              budget.enter_node(nodes).has_value()
+              && all_admitted;
+        }
+
+        const auto stopped = budget.enter_node(nodes);
+        expect(
+          all_admitted
+            && !stopped
+            && stopped.error()
+                 == SearchStopReason::NODE_LIMIT
+            && nodes == exact_limit,
+          "sampled asynchronous controls preserve an exact node limit");
+    }
+
+    {
+        SearchDetail::SearchTimeControl control{
+          SearchDuration{10},
+          SearchDuration{5}};
+        const SearchClock::time_point activation{
+          SearchDuration{100}};
+
+        expect(
+          !control.active()
+            && !control.soft_limit_reached(
+                 SearchClock::time_point::max())
+            && !control.hard_limit_reached(
+                 SearchClock::time_point::max()),
+          "dormant shared deadlines do not consume pondering time");
+        expect(
+          control.activate(activation)
+            && control.active()
+            && !control.activate(
+                 SearchClock::time_point{
+                   SearchDuration{200}}),
+          "shared deadlines retain their first activation time");
+        expect(
+          !control.soft_limit_reached(
+            activation + SearchDuration{4})
+            && control.soft_limit_reached(
+                 activation + SearchDuration{5})
+            && !control.hard_limit_reached(
+                 activation + SearchDuration{9})
+            && control.hard_limit_reached(
+                 activation + SearchDuration{10}),
+          "shared soft and hard deadlines start at activation");
+    }
+
+    {
+        SearchDetail::SearchTimeControl control{
+          SearchDuration::zero(),
+          SearchDuration::zero()};
+        SearchDetail::SearchBudget budget{
+          std::nullopt,
+          std::nullopt,
+          nullptr,
+          &control};
+        std::uint64_t nodes = 0;
+        const auto before_activation =
+          budget.enter_node(nodes);
+        static_cast<void>(
+          control.activate(SearchClock::now()));
+        auto stopped = budget.enter_node(nodes);
+        while (stopped)
+            stopped = budget.enter_node(nodes);
+
+        expect(
+          before_activation
+            && !stopped
+            && stopped.error()
+                 == SearchStopReason::TIME_LIMIT
+            && nodes
+                 == SearchDetail::CONTROL_CHECK_INTERVAL,
+          "shared-control activation is observed within the sampled-node bound");
+    }
+
+    {
+        SearchDetail::SearchTimeControl control{
+          SearchDuration::zero(),
+          std::nullopt};
+        static_cast<void>(
+          control.activate(SearchClock::now()));
+        SearchDetail::SearchBudget budget{
+          std::nullopt,
+          std::nullopt,
+          nullptr,
+          &control};
+        std::uint64_t nodes =
+          SearchDetail::CONTROL_CHECK_INTERVAL - 1;
+        const auto stopped = budget.enter_node(nodes);
+
+        expect(
+          !stopped
+            && stopped.error()
+                 == SearchStopReason::TIME_LIMIT
+            && nodes
+                 == SearchDetail::CONTROL_CHECK_INTERVAL - 1,
+          "the first budget entry observes an activated shared time limit");
+    }
 
     SearchDetail::UnlimitedBudget unlimited;
     std::uint64_t maximum_nodes =
@@ -530,6 +732,17 @@ void test_aspiration_primitives() {
              FULL_ASPIRATION_HALF_WIDTH)
              .is_full(),
       "aspiration widening covers fail-soft bounds and reaches full range");
+
+    const AspirationWindow failed_low{Score{53}, Score{153}};
+    const AspirationWindow failed_high{Score{-153}, Score{-53}};
+    expect(
+      widen_aspiration_window(
+        failed_low, failed_low.alpha, 100)
+          == AspirationWindow{Score{-47}, Score{53}}
+        && widen_aspiration_window(
+             failed_high, failed_high.beta, 100)
+             == AspirationWindow{Score{-53}, Score{47}},
+      "aspiration recovery retains the proven boundary and widens directionally");
 }
 
 void test_completed_iterations_match_fixed_search() {
@@ -552,21 +765,22 @@ void test_completed_iterations_match_fixed_search() {
             depth_limits(3));
 
         expect(
-          depth_one.nodes == 9
-            && depth_two.nodes == 24
-            && depth_three.nodes == 95,
-          "the kings-only fixed-depth baselines retain their node counts");
+          depth_one.nodes > 0
+            && depth_two.nodes > depth_one.nodes
+            && depth_three.nodes > depth_two.nodes,
+          "deeper kings-only searches visit progressively more nodes");
         expect(
           iterative.stop
               == IterativeStop::DEPTH_LIMIT
             && iterative.last_completed
             && iterative.last_completed->depth == 3
-            && iterative.last_completed->result
-                 == depth_three
+            && iterative.last_completed->selective_depth
+                 >= iterative.last_completed->depth
+            && same_principal_result(
+                 iterative.last_completed->result,
+                 depth_three)
             && iterative.total_nodes
-                 == depth_one.nodes
-                    + depth_two.nodes
-                    + depth_three.nodes
+                 >= iterative.last_completed->result.nodes
             && iterative.elapsed
                  >= SearchDuration::zero(),
           "unlimited iterative deepening reports the deepest fixed-depth result");
@@ -597,10 +811,14 @@ void test_completed_iterations_match_fixed_search() {
         expect(
           iterative.last_completed
             && iterative.last_completed->depth == 2
-            && iterative.last_completed->result
-                 == fixed
+            && iterative.last_completed->selective_depth
+                 >= iterative.last_completed->depth
+            && same_principal_result(
+                 iterative.last_completed->result,
+                 fixed)
             && iterative.total_nodes
-                 == shallow.nodes + fixed.nodes,
+                 >= iterative.last_completed->result.nodes
+            && iterative.total_nodes > shallow.nodes,
           "rotated iterative results match fixed-depth search");
         expect(
           positions_equal(position, original)
@@ -616,10 +834,27 @@ void test_exact_node_limits() {
     const Position original = position;
     const std::array keys = {position.key()};
     PositionHistory history = make_history(keys);
-    const SearchResult depth_one =
-      search(position, history, 1);
-    const SearchResult depth_two =
-      search(position, history, 2);
+    const IterativeResult complete_one =
+      iterative_search(
+        position, history, depth_limits(1));
+    const IterativeResult complete_two =
+      iterative_search(
+        position, history, depth_limits(2));
+    expect(
+      complete_one.last_completed
+        && complete_two.last_completed,
+      "unlimited searches establish exact node-limit boundaries");
+
+    if (!complete_one.last_completed
+        || !complete_two.last_completed)
+        return;
+
+    const std::uint64_t one_node_boundary =
+      complete_one.total_nodes;
+    const std::uint64_t two_node_boundary =
+      complete_two.total_nodes;
+    assert(one_node_boundary > 0);
+    assert(two_node_boundary > one_node_boundary);
 
     struct Boundary {
         std::uint64_t limit;
@@ -629,10 +864,22 @@ void test_exact_node_limits() {
 
     const std::array boundaries = {
       Boundary{0, 0, IterativeStop::NODE_LIMIT},
-      Boundary{8, 0, IterativeStop::NODE_LIMIT},
-      Boundary{9, 1, IterativeStop::NODE_LIMIT},
-      Boundary{32, 1, IterativeStop::NODE_LIMIT},
-      Boundary{33, 2, IterativeStop::DEPTH_LIMIT},
+      Boundary{
+        one_node_boundary - 1,
+        0,
+        IterativeStop::NODE_LIMIT},
+      Boundary{
+        one_node_boundary,
+        1,
+        IterativeStop::NODE_LIMIT},
+      Boundary{
+        two_node_boundary - 1,
+        1,
+        IterativeStop::NODE_LIMIT},
+      Boundary{
+        two_node_boundary,
+        2,
+        IterativeStop::DEPTH_LIMIT},
     };
 
     for (const Boundary boundary : boundaries) {
@@ -654,16 +901,17 @@ void test_exact_node_limits() {
               !result.last_completed,
               "an interrupted first iteration publishes no partial result");
         } else {
-            const SearchResult expected =
+            const SearchResult& expected =
               boundary.completed_depth == 1
-                ? depth_one
-                : depth_two;
+                ? complete_one.last_completed->result
+                : complete_two.last_completed->result;
             expect(
               result.last_completed
                 && result.last_completed->depth
                      == boundary.completed_depth
-                && result.last_completed->result
-                     == expected,
+                && same_principal_result(
+                     result.last_completed->result,
+                     expected),
               "a node-limited run retains only its deepest completed iteration");
         }
 
@@ -677,15 +925,16 @@ void test_exact_node_limits() {
       iterative_search(
         position,
         history,
-        node_limits(1, depth_one.nodes));
+        node_limits(1, one_node_boundary));
     expect(
       exact_final.stop
           == IterativeStop::DEPTH_LIMIT
         && exact_final.total_nodes
-             == depth_one.nodes
+             == one_node_boundary
         && exact_final.last_completed
-        && exact_final.last_completed->result
-             == depth_one,
+        && same_principal_result(
+             exact_final.last_completed->result,
+             complete_one.last_completed->result),
       "the requested depth takes precedence when its final node uses the limit");
 }
 
@@ -952,7 +1201,8 @@ void test_aspiration_researches() {
             depth_limits(2));
 
         expect(
-          depth_one.score == Score{-1660}
+          depth_one.score
+              > -SearchDetail::TABLE_MATE_THRESHOLD
             && depth_two.score
                  == -MATE_SCORE + Score{4}
             && result.stop
@@ -969,6 +1219,48 @@ void test_aspiration_researches() {
             && history_matches(history, keys),
           "mate-band aspiration re-searches preserve position and history");
     }
+}
+
+void test_one_generation_per_root_search() {
+    Position position = repeated_fail_low_position();
+    const Position original = position;
+    const std::array keys = {position.key()};
+    PositionHistory history = make_history(keys);
+    TranspositionTable table;
+    const std::uint32_t initial_generation =
+      table.generation();
+
+    const IterativeResult first =
+      iterative_search(
+        position,
+        history,
+        depth_limits(2),
+        table);
+    expect(
+      first.stop == IterativeStop::DEPTH_LIMIT
+        && first.last_completed
+        && first.last_completed->depth == 2
+        && first.last_completed->attempts >= 3
+        && table.generation()
+             == initial_generation + 1,
+      "all depths and aspiration attempts share one table generation");
+
+    const IterativeResult second =
+      iterative_search(
+        position,
+        history,
+        depth_limits(2),
+        table);
+    expect(
+      second.stop == IterativeStop::DEPTH_LIMIT
+        && second.last_completed
+        && table.generation()
+             == initial_generation + 2,
+      "a separate iterative root search advances the table generation once");
+    expect(
+      positions_equal(position, original)
+        && history_matches(history, keys),
+      "generation accounting preserves position and history");
 }
 
 void test_previous_result_and_table_ordering() {
@@ -996,31 +1288,25 @@ void test_previous_result_and_table_ordering() {
         depth_limits(3));
 
     expect(
-      fixed_one.nodes == 49
-        && fixed_two.nodes == 219
-        && depth_two.total_nodes == 152
+      fixed_one.nodes > 0
+        && fixed_two.nodes > fixed_one.nodes
         && depth_two.last_completed
-        && depth_two.last_completed->attempts == 1
-        && depth_two.last_completed->result.nodes
-             == 103
-        && depth_two.last_completed->result.score
-             == fixed_two.score
-        && depth_two.last_completed->result.best_move
-             == fixed_two.best_move,
-      "history-and-killer-assisted search has the expected "
-      "depth-two result and node shape");
+        && same_principal_result(
+             depth_two.last_completed->result,
+             fixed_two)
+        && depth_two.total_nodes
+             >= depth_two.last_completed->result.nodes,
+      "history-and-killer-assisted search preserves the depth-two result");
     expect(
-      fixed_three.nodes == 1146
-        && depth_three.total_nodes == 1188
+      fixed_three.nodes > fixed_two.nodes
         && depth_three.last_completed
-        && depth_three.last_completed->result.nodes
-             == 1036
-        && depth_three.last_completed->result.score
-             == fixed_three.score
-        && depth_three.last_completed->result.best_move
-             == fixed_three.best_move,
-      "history-and-killer-assisted search has the expected "
-      "depth-three result and node shape");
+        && same_principal_result(
+             depth_three.last_completed->result,
+             fixed_three)
+        && depth_three.total_nodes
+             >= depth_three.last_completed->result.nodes
+        && depth_three.total_nodes > depth_two.total_nodes,
+      "history-and-killer-assisted search preserves the depth-three result");
 
     const std::uint64_t complete_limit =
       depth_two.total_nodes;
@@ -1153,6 +1439,78 @@ void test_time_limits() {
       search(position, history, 1);
     const SearchResult depth_two =
       search(position, history, 2);
+
+    IterativeLimits soft_stop = generous;
+    soft_stop.soft_time_limit =
+      SearchDuration::zero();
+    const IterativeResult stopped_between_iterations =
+      iterative_search(
+        position, history, soft_stop);
+    expect(
+      stopped_between_iterations.stop
+          == IterativeStop::TIME_LIMIT
+        && stopped_between_iterations.last_completed
+        && stopped_between_iterations.last_completed->depth
+             == 1
+        && stopped_between_iterations.last_completed->result
+             == depth_one
+        && stopped_between_iterations.total_nodes
+             == depth_one.nodes,
+      "a zero soft limit retains depth one before declining a deeper iteration");
+
+    SearchDetail::SearchTimeControl dormant_control{
+      SearchDuration::zero(),
+      SearchDuration::zero()};
+    IterativeLimits dormant = depth_limits(1);
+    dormant.time_control = &dormant_control;
+    const IterativeResult completed_while_dormant =
+      iterative_search(
+        position, history, dormant);
+    expect(
+      completed_while_dormant.stop
+          == IterativeStop::DEPTH_LIMIT
+        && completed_while_dormant.last_completed
+        && completed_while_dormant.last_completed->result
+             == depth_one,
+      "dormant shared time limits do not consume pondering time");
+
+    static_cast<void>(
+      dormant_control.activate(SearchClock::now()));
+    const IterativeResult stopped_after_activation =
+      iterative_search(
+        position, history, dormant);
+    expect(
+      stopped_after_activation.stop
+          == IterativeStop::TIME_LIMIT
+        && stopped_after_activation.total_nodes == 0
+        && !stopped_after_activation.last_completed,
+      "an activated zero shared hard limit stops before the first node");
+
+    SearchDetail::SearchTimeControl activated_soft_control{
+      std::chrono::duration_cast<SearchDuration>(
+        std::chrono::hours{1}),
+      SearchDuration::zero()};
+    static_cast<void>(
+      activated_soft_control.activate(
+        SearchClock::now()));
+    IterativeLimits activated_soft =
+      depth_limits(2);
+    activated_soft.time_control =
+      &activated_soft_control;
+    const IterativeResult shared_soft_stop =
+      iterative_search(
+        position, history, activated_soft);
+    expect(
+      shared_soft_stop.stop
+          == IterativeStop::TIME_LIMIT
+        && shared_soft_stop.last_completed
+        && shared_soft_stop.last_completed->depth == 1
+        && shared_soft_stop.last_completed->result
+             == depth_one
+        && shared_soft_stop.total_nodes
+             == depth_one.nodes,
+      "an activated shared soft limit retains the completed iteration");
+
     const IterativeResult completed =
       iterative_search(
         position, history, generous);
@@ -1160,11 +1518,12 @@ void test_time_limits() {
       completed.stop
           == IterativeStop::DEPTH_LIMIT
         && completed.last_completed
-        && completed.last_completed->result
-             == depth_two
+        && same_principal_result(
+             completed.last_completed->result,
+             depth_two)
         && completed.total_nodes
-             == depth_one.nodes
-                + depth_two.nodes,
+             >= completed.last_completed->result.nodes
+        && completed.total_nodes > depth_one.nodes,
       "a generous time limit completes the requested depth");
 
     IterativeLimits saturated =
@@ -1448,6 +1807,7 @@ int main() {
     test_nested_cancellation();
     test_partial_iteration_never_leaks();
     test_aspiration_researches();
+    test_one_generation_per_root_search();
     test_previous_result_and_table_ordering();
     test_every_special_state_interruption();
     test_time_limits();

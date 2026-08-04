@@ -412,6 +412,104 @@ void verify_case(
     }
 }
 
+void verify_fast_case(
+  ExchangeCase exchange_case) {
+    for (int rotation = 0;
+         rotation < COLOR_NB;
+         ++rotation) {
+        const Position original =
+          exchange_case.position;
+        MoveList legal_moves;
+        generate_legal_moves(
+          exchange_case.position, legal_moves);
+
+        const Score oracle = Oracle::evaluate(
+          exchange_case.position,
+          exchange_case.move);
+        const FastExchangeResult exact_threshold =
+          fast_static_exchange_at_least(
+            exchange_case.position,
+            exchange_case.move,
+            oracle);
+        const FastExchangeResult greater_threshold =
+          fast_static_exchange_at_least(
+            exchange_case.position,
+            exchange_case.move,
+            oracle + 1);
+
+        expect(
+          contains_move(
+            legal_moves, exchange_case.move),
+          exchange_case.name,
+          "the fast exchange move is legal");
+        expect(
+          oracle == exchange_case.expected,
+          exchange_case.name,
+          "the fast exchange regression matches the oracle");
+        expect(
+          exact_threshold
+            == FastExchangeResult::AT_LEAST,
+          exchange_case.name,
+          "the fast exchange accepts the exact oracle threshold");
+        expect(
+          greater_threshold
+            == FastExchangeResult::BELOW,
+          exchange_case.name,
+          "the fast exchange rejects the next greater threshold");
+        expect(
+          fast_static_exchange_is_not_proven_below(
+            exchange_case.position,
+            exchange_case.move,
+            oracle)
+          && !fast_static_exchange_is_not_proven_below(
+            exchange_case.position,
+            exchange_case.move,
+            oracle + 1),
+          exchange_case.name,
+          "the fast conservative wrapper preserves proven results");
+        expect(
+          positions_equal(
+            exchange_case.position, original),
+          exchange_case.name,
+          "the fast exchange leaves every position field unchanged");
+
+        exchange_case.position =
+          rotate_clockwise(
+            exchange_case.position);
+        exchange_case.move =
+          rotate_clockwise(exchange_case.move);
+    }
+}
+
+void verify_fast_unknown(
+  Position position,
+  Move move,
+  std::string_view case_name) {
+    MoveList legal_moves;
+    generate_legal_moves(position, legal_moves);
+    const Position original = position;
+
+    expect(
+      contains_move(legal_moves, move),
+      case_name,
+      "the unsupported fast exchange move is legal");
+    expect(
+      fast_static_exchange_at_least(
+        position, move, 0)
+        == FastExchangeResult::UNKNOWN,
+      case_name,
+      "the occupancy-only exchange reports unknown");
+    expect(
+      fast_static_exchange_is_not_proven_below(
+        position, move, 0),
+      case_name,
+      "unknown passes through the conservative wrapper");
+    expect(
+      positions_equal(position, original),
+      case_name,
+      "unknown classification leaves every position field unchanged");
+}
+
 [[nodiscard]] constexpr ExchangeCase
 undefended_capture_case() noexcept {
     Position position = base_position();
@@ -456,7 +554,17 @@ constexpr_exchange_works() {
         && !static_exchange_at_least(
              exchange_case.position,
              exchange_case.move,
-             std::numeric_limits<Score>::max());
+             std::numeric_limits<Score>::max())
+        && fast_static_exchange_at_least(
+             exchange_case.position,
+             exchange_case.move,
+             ROOK_VALUE)
+             == FastExchangeResult::AT_LEAST
+        && fast_static_exchange_at_least(
+             exchange_case.position,
+             exchange_case.move,
+             ROOK_VALUE + 1)
+             == FastExchangeResult::BELOW;
 }
 
 static_assert(constexpr_exchange_works());
@@ -479,6 +587,155 @@ static_assert(noexcept(
   static_exchange_is_not_proven_losing(
     std::declval<const Position&>(),
     std::declval<Move>())));
+static_assert(noexcept(
+  fast_static_exchange_at_least(
+    std::declval<const Position&>(),
+    std::declval<Move>(),
+    std::declval<Score>())));
+static_assert(noexcept(
+  fast_static_exchange_is_not_proven_below(
+    std::declval<const Position&>(),
+    std::declval<Move>(),
+    std::declval<Score>())));
+
+void test_fast_exchange_threshold() {
+    verify_fast_case(undefended_capture_case());
+
+    {
+        Position position = base_position();
+        position.put_piece(
+          R_QUEEN, make_square(FILE_H, RANK_6));
+        position.put_piece(
+          B_PAWN, make_square(FILE_H, RANK_8));
+        position.put_piece(
+          G_ROOK, make_square(FILE_H, RANK_10));
+        verify_fast_case({
+          position,
+          Move::normal(
+            make_square(FILE_H, RANK_6),
+            make_square(FILE_H, RANK_8)),
+          PAWN_VALUE - QUEEN_VALUE,
+          "fast losing defended capture",
+        });
+    }
+
+    {
+        Position position = base_position();
+        position.put_piece(
+          R_QUEEN, make_square(FILE_G, RANK_7));
+        position.put_piece(
+          B_PAWN, make_square(FILE_H, RANK_8));
+        position.put_piece(
+          G_ROOK, make_square(FILE_H, RANK_10));
+        position.put_piece(
+          Y_BISHOP, make_square(FILE_F, RANK_6));
+        position.put_piece(
+          B_BISHOP, make_square(FILE_E, RANK_5));
+        position.put_piece(
+          R_BISHOP, make_square(FILE_D, RANK_4));
+        verify_fast_case({
+          position,
+          Move::normal(
+            make_square(FILE_G, RANK_7),
+            make_square(FILE_H, RANK_8)),
+          -300,
+          "fast four-reply x-ray sequence",
+        });
+    }
+
+    {
+        Position position = base_position();
+        position.remove_piece(
+          make_square(FILE_A, RANK_7));
+        position.put_piece(
+          B_KING, make_square(FILE_H, RANK_4));
+        position.put_piece(
+          R_ROOK, make_square(FILE_H, RANK_10));
+        position.put_piece(
+          B_ROOK, make_square(FILE_H, RANK_7));
+        position.put_piece(
+          R_PAWN, make_square(FILE_H, RANK_6));
+        position.put_piece(
+          B_PAWN, make_square(FILE_I, RANK_7));
+        verify_fast_case({
+          position,
+          Move::normal(
+            make_square(FILE_H, RANK_6),
+            make_square(FILE_I, RANK_7)),
+          PAWN_VALUE,
+          "fast pinned illegal recapture",
+        });
+    }
+
+    {
+        Position position = base_position();
+        position.put_piece(
+          R_ROOK, make_square(FILE_H, RANK_6));
+        position.put_piece(
+          B_PAWN, make_square(FILE_H, RANK_8));
+        position.put_piece(
+          G_PAWN, make_square(FILE_I, RANK_9));
+        position.put_piece(
+          Y_PAWN, make_square(FILE_G, RANK_9));
+        verify_fast_case({
+          position,
+          Move::normal(
+            make_square(FILE_H, RANK_6),
+            make_square(FILE_H, RANK_8)),
+          PAWN_VALUE - ROOK_VALUE + PAWN_VALUE,
+          "fast teammate recapture",
+        });
+    }
+
+    {
+        Position position = base_position();
+        position.put_piece(
+          R_KNIGHT, make_square(FILE_F, RANK_11));
+        position.put_piece(
+          B_PAWN, make_square(FILE_H, RANK_12));
+        position.put_piece(
+          Y_PAWN, make_square(FILE_H, RANK_11));
+        position.put_piece(
+          B_PAWN, make_square(FILE_G, RANK_11));
+        position.set_en_passant_square(
+          YELLOW, make_square(FILE_H, RANK_12));
+        verify_fast_unknown(
+          position,
+          Move::normal(
+            make_square(FILE_F, RANK_11),
+            make_square(FILE_H, RANK_12)),
+          "fast en-passant reply pass-through");
+    }
+
+    {
+        Position position = base_position();
+        position.put_piece(
+          R_PAWN, make_square(FILE_H, RANK_10));
+        verify_fast_unknown(
+          position,
+          Move::promotion(
+            make_square(FILE_H, RANK_10),
+            make_square(FILE_H, RANK_11),
+            QUEEN),
+          "fast promotion pass-through");
+    }
+
+    {
+        Position position = base_position();
+        position.put_piece(
+          R_QUEEN, make_square(FILE_K, RANK_8));
+        position.put_piece(
+          B_PAWN, make_square(FILE_K, RANK_10));
+        position.put_piece(
+          B_PAWN, make_square(FILE_J, RANK_9));
+        verify_fast_unknown(
+          position,
+          Move::normal(
+            make_square(FILE_K, RANK_8),
+            make_square(FILE_K, RANK_10)),
+          "fast promotion-recapture pass-through");
+    }
+}
 
 void test_capture_sequences() {
     verify_case(undefended_capture_case());
@@ -772,14 +1029,23 @@ void test_king_recaptures() {
           B_KING, make_square(FILE_H, RANK_8));
         position.put_piece(
           R_ROOK, make_square(FILE_H, RANK_6));
+        const Move capture = Move::normal(
+          make_square(FILE_H, RANK_6),
+          make_square(FILE_H, RANK_8));
         verify_case({
           position,
-          Move::normal(
-            make_square(FILE_H, RANK_6),
-            make_square(FILE_H, RANK_8)),
+          capture,
           EXCHANGE_KING_SCORE,
           "direct king capture",
         });
+        expect(
+          !static_exchange_is_not_proven_below(
+            position,
+            capture,
+            EXCHANGE_KING_SCORE + 1,
+            1),
+          "direct king capture",
+          "the immediate shortcut respects thresholds above the terminal score");
     }
 
     {
@@ -997,6 +1263,86 @@ void test_quiet_exchange() {
     });
 }
 
+void test_immediate_gain_shortcut() {
+    {
+        Position position = base_position();
+        position.put_piece(
+          R_PAWN, make_square(FILE_G, RANK_7));
+        position.put_piece(
+          B_ROOK, make_square(FILE_H, RANK_8));
+        const Move capture = Move::normal(
+          make_square(FILE_G, RANK_7),
+          make_square(FILE_H, RANK_8));
+        MoveList legal_moves;
+        generate_legal_moves(position, legal_moves);
+
+        expect(
+          contains_move(legal_moves, capture)
+            && ExchangeDetail::post_move_piece_value(
+                 position, capture) == PAWN_VALUE
+            && ExchangeDetail::maximum_first_reply_gain(
+                 position, capture) == PAWN_VALUE
+            && ExchangeDetail::immediate_gain_guarantees(
+                 position, capture, 0)
+            && static_exchange_is_not_proven_below(
+                 position, capture, 0, 1),
+          "immediate-gain shortcut",
+          "a rook capture by a pawn needs no recursive exchange nodes");
+    }
+
+    {
+        Position position = base_position();
+        position.put_piece(
+          R_ROOK, make_square(FILE_K, RANK_6));
+        position.put_piece(
+          B_ROOK, make_square(FILE_K, RANK_8));
+        const Move capture = Move::normal(
+          make_square(FILE_K, RANK_6),
+          make_square(FILE_K, RANK_8));
+        MoveList legal_moves;
+        generate_legal_moves(position, legal_moves);
+
+        expect(
+          contains_move(legal_moves, capture)
+            && ExchangeDetail::maximum_first_reply_gain(
+                 position, capture)
+                 == ROOK_VALUE
+                    + QUEEN_VALUE
+                    - PAWN_VALUE
+            && !ExchangeDetail::immediate_gain_guarantees(
+                 position, capture, 0),
+          "immediate-gain shortcut",
+          "a possible promotion reply remains in recursive classification");
+    }
+
+    {
+        Position position = base_position();
+        position.put_piece(
+          R_ROOK, make_square(FILE_C, RANK_6));
+        position.put_piece(
+          B_ROOK, make_square(FILE_C, RANK_8));
+        position.put_piece(
+          B_PAWN, make_square(FILE_D, RANK_8));
+        position.set_en_passant_square(
+          BLUE, make_square(FILE_C, RANK_8));
+        const Move capture = Move::normal(
+          make_square(FILE_C, RANK_6),
+          make_square(FILE_C, RANK_8));
+        MoveList legal_moves;
+        generate_legal_moves(position, legal_moves);
+
+        expect(
+          contains_move(legal_moves, capture)
+            && ExchangeDetail::maximum_first_reply_gain(
+                 position, capture)
+                 == ROOK_VALUE + PAWN_VALUE
+            && !ExchangeDetail::immediate_gain_guarantees(
+                 position, capture, 0),
+          "immediate-gain shortcut",
+          "a possible en-passant reply includes its additional pawn");
+    }
+}
+
 void test_ordering_bands() {
     Position position = base_position();
     position.put_piece(
@@ -1194,13 +1540,33 @@ void test_sparse_oracle_agreement() {
                     continue;
 
                 ++tactical_count;
+                const Score oracle =
+                  Oracle::evaluate(position, move);
                 expect(
                   static_exchange_evaluation(
                     position, move)
-                    == Oracle::evaluate(
-                      position, move),
+                    == oracle,
                   "sparse oracle agreement",
                   "every legal tactical move matches the independent oracle");
+                if (move.type() == MoveType::NORMAL) {
+                    const FastExchangeResult at_value =
+                      fast_static_exchange_at_least(
+                        position, move, oracle);
+                    const FastExchangeResult above_value =
+                      fast_static_exchange_at_least(
+                        position, move, oracle + 1);
+                    expect(
+                      (at_value
+                         == FastExchangeResult::AT_LEAST
+                       || at_value
+                            == FastExchangeResult::UNKNOWN)
+                      && (above_value
+                            == FastExchangeResult::BELOW
+                          || above_value
+                               == FastExchangeResult::UNKNOWN),
+                      "sparse fast exchange agreement",
+                      "classified normal captures bracket the oracle value");
+                }
                 expect(
                   positions_equal(
                     position, original),
@@ -1304,6 +1670,7 @@ void test_dense_threshold_search() {
 }  // namespace
 
 int main() {
+    test_fast_exchange_threshold();
     test_capture_sequences();
     test_declined_and_deep_sequences();
     test_four_player_participation();
@@ -1313,6 +1680,7 @@ int main() {
     test_en_passant();
     test_cutout_boundary();
     test_quiet_exchange();
+    test_immediate_gain_shortcut();
     test_ordering_bands();
     test_sparse_oracle_agreement();
     test_dense_threshold_search();

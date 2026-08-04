@@ -191,6 +191,34 @@ void test_msb_operation() {
     expect(bitboard.msb() == Square(7), "msb returns the final set bit");
 }
 
+void test_intersection_extrema() {
+    using namespace Mockingbird;
+
+    Bitboard left;
+    left.set(Square(7));
+    left.set(Square(65));
+    left.set(Square(190));
+    left.set(Square(193));
+
+    Bitboard right;
+    right.set(Square(0));
+    right.set(Square(65));
+    right.set(Square(190));
+    right.set(Square(255));
+
+    expect(left.lsb_intersection(right) == Square(65),
+           "intersection lsb finds the first shared bit across limbs");
+    expect(left.msb_intersection(right) == Square(190),
+           "intersection msb finds the last shared bit across limbs");
+
+    right.clear(Square(65));
+    right.clear(Square(190));
+    expect(left.lsb_intersection(right) == SQ_NONE,
+           "intersection lsb reports an empty intersection");
+    expect(left.msb_intersection(right) == SQ_NONE,
+           "intersection msb reports an empty intersection");
+}
+
 void test_playable_square_mask() {
     using namespace Mockingbird;
 
@@ -229,6 +257,7 @@ int main() {
     test_shifts();
     test_lsb_operations();
     test_msb_operation();
+    test_intersection_extrema();
     test_playable_square_mask();
 
     if (failures != 0) {

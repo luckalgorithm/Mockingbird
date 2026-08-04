@@ -143,6 +143,14 @@ inline constexpr std::array<Square, COLOR_NB>
     return true;
 }
 
+[[nodiscard]] constexpr bool is_tactical_subsequence_move(
+  const Position& position,
+  Move move) noexcept {
+    return move.type() == MoveType::EN_PASSANT
+        || move.is_promotion()
+        || !position.empty(move.to());
+}
+
 constexpr void add_missing_kings(Position& position) noexcept {
     for (int color_index = 0;
          color_index < COLOR_NB;
@@ -264,6 +272,114 @@ constexpr void reference_generate_legal_moves(
         && positions_equal(position, original);
 }
 
+[[nodiscard]] bool context_overloads_match_public(
+  Position position) {
+    const Position original = position;
+    if (!Detail::has_exactly_one_king_per_color(position))
+        return false;
+
+    const Detail::LegalMoveContext context =
+      Detail::make_legal_move_context(position);
+    bool matches =
+      context.checked == in_check(position);
+
+    const Move public_first = first_legal_move(position);
+    const Move context_first =
+      Detail::first_legal_move_with_context(
+        position, context);
+    matches &= public_first == context_first;
+    matches &= has_legal_move(position)
+            == Detail::has_legal_move_with_context(
+                 position, context);
+
+    MoveList public_moves;
+    generate_legal_moves(position, public_moves);
+    MoveList context_moves;
+    Detail::generate_legal_moves_with_context(
+      position, context_moves, context);
+    matches &= move_lists_equal(
+      public_moves, context_moves);
+
+    MoveList public_tactical;
+    generate_legal_tactical_moves(
+      position, public_tactical);
+    MoveList context_tactical;
+    Detail::generate_legal_tactical_moves_with_context(
+      position, context_tactical, context);
+    matches &= move_lists_equal(
+      public_tactical, context_tactical);
+
+    constexpr Move prefix = Move::normal(
+      make_square(FILE_D, RANK_4),
+      make_square(FILE_E, RANK_4));
+    MoveList public_appended;
+    public_appended.push_back(prefix);
+    generate_legal_moves(position, public_appended);
+    MoveList context_appended;
+    context_appended.push_back(prefix);
+    Detail::generate_legal_moves_with_context(
+      position, context_appended, context);
+    matches &= move_lists_equal(
+      public_appended, context_appended);
+
+    MoveList public_tactical_appended;
+    public_tactical_appended.push_back(prefix);
+    generate_legal_tactical_moves(
+      position, public_tactical_appended);
+    MoveList context_tactical_appended;
+    context_tactical_appended.push_back(prefix);
+    Detail::generate_legal_tactical_moves_with_context(
+      position,
+      context_tactical_appended,
+      context);
+    matches &= move_lists_equal(
+      public_tactical_appended,
+      context_tactical_appended);
+
+    MoveList pseudo_moves;
+    generate_moves(position, pseudo_moves);
+    for (const Move move : pseudo_moves) {
+        matches &= Detail::is_cached_move_legal(
+                     position, move)
+                == Detail::is_cached_move_legal(
+                     position, move, context);
+    }
+
+    matches &= !Detail::is_cached_move_legal(
+                 position, Move::none());
+    matches &= !Detail::is_cached_move_legal(
+                 position, Move::none(), context);
+
+    Move nongenerated = Move::none();
+    for (int from_index = 0;
+         from_index < SQUARE_NB
+         && !nongenerated.is_board_move();
+         ++from_index) {
+        const Square from = Square(from_index);
+        if (!is_ok(from) || !position.empty(from))
+            continue;
+
+        for (int to_index = 0;
+             to_index < SQUARE_NB;
+             ++to_index) {
+            const Square to = Square(to_index);
+            if (is_ok(to) && to != from) {
+                nongenerated = Move::normal(from, to);
+                break;
+            }
+        }
+    }
+
+    matches &= nongenerated.is_board_move();
+    matches &= !Detail::is_cached_move_legal(
+                 position, nongenerated);
+    matches &= !Detail::is_cached_move_legal(
+                 position, nongenerated, context);
+
+    return matches
+        && positions_equal(position, original);
+}
+
 [[nodiscard]] constexpr Square rotate_clockwise(
   Square square) noexcept {
     return make_square(
@@ -371,7 +487,10 @@ struct FrontierStats {
         return false;
 
     const bool expected_has_move = !expected.empty();
+    const Move first = first_legal_move(position);
     if (has_legal_move(position) != expected_has_move
+        || first.is_board_move() != expected_has_move
+        || (expected_has_move && first != expected[0])
         || !positions_equal(position, original))
         return false;
 
@@ -1509,6 +1628,85 @@ void test_filter_oracle_fixtures() {
       "all rotations of every targeted fixture match the transition oracle");
 }
 
+void test_known_complete_context_overloads() {
+    const std::array<Position, 12> fixtures = {
+      pin_position(),
+      single_check_position(),
+      double_check_position(),
+      en_passant_xray_position(),
+      en_passant_xray_position(true),
+      en_passant_evasion_position(),
+      promotion_position(),
+      en_passant_promotion_position(),
+      legal_en_passant_promotion_position(),
+      terminal_promotion_position(),
+      terminal_en_passant_position(),
+      castling_position(),
+    };
+
+    bool passed = true;
+    for (Position position : fixtures) {
+        for (int rotation = 0;
+             rotation < COLOR_NB;
+             ++rotation) {
+            passed &=
+              context_overloads_match_public(position);
+            position = rotate_clockwise(position);
+        }
+    }
+
+    expect(
+      passed,
+      "known-complete context overloads match validated public boundaries");
+}
+
+void test_legal_tactical_subsequence() {
+    const std::array<Position, 12> fixtures = {
+      pin_position(),
+      single_check_position(),
+      double_check_position(),
+      en_passant_xray_position(),
+      en_passant_xray_position(true),
+      en_passant_evasion_position(),
+      promotion_position(),
+      en_passant_promotion_position(),
+      legal_en_passant_promotion_position(),
+      terminal_promotion_position(),
+      terminal_en_passant_position(),
+      castling_position(),
+    };
+
+    bool passed = true;
+    for (Position position : fixtures) {
+        for (int rotation = 0;
+             rotation < COLOR_NB;
+             ++rotation) {
+            const Position original = position;
+            MoveList all_legal;
+            generate_legal_moves(position, all_legal);
+
+            MoveList expected;
+            for (const Move move : all_legal) {
+                if (is_tactical_subsequence_move(
+                      position, move)) {
+                    expected.push_back(move);
+                }
+            }
+
+            MoveList actual;
+            generate_legal_tactical_moves(
+              position, actual);
+            passed &= move_lists_equal(actual, expected)
+                   && positions_equal(position, original);
+            position = rotate_clockwise(position);
+        }
+    }
+
+    expect(
+      passed,
+      "legal tactical generation matches the filtered legal subsequence");
+}
+
 void test_oracle_reachable_frontiers() {
     Position starting = make_starting_position();
     FrontierStats starting_stats;
@@ -1612,6 +1810,8 @@ int main() {
     test_promotion_legality_and_order();
     test_castling_and_rotation();
     test_filter_oracle_fixtures();
+    test_known_complete_context_overloads();
+    test_legal_tactical_subsequence();
     test_oracle_reachable_frontiers();
     test_exact_remaining_capacity();
 

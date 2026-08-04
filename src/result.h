@@ -143,13 +143,18 @@ enum class KingLayout : std::uint8_t {
     return team == RED_YELLOW ? BLUE_GREEN : RED_YELLOW;
 }
 
-[[nodiscard]] constexpr PositionResult classify_result(
+// Classifies a position using facts already established by the caller.
+// Preconditions: layout describes position; when layout is COMPLETE and no
+// legal move exists, checked reports whether the moving color is in check.
+[[nodiscard]] constexpr PositionResult classify_result_with_facts(
   const Position& position,
   const PositionHistory& history,
-  bool legal_move_exists) noexcept {
+  KingLayout layout,
+  bool legal_move_exists,
+  bool checked) noexcept {
     assert(history.current_key() == position.key());
 
-    switch (king_layout(position)) {
+    switch (layout) {
         case KingLayout::RED_YELLOW_MISSING:
             return PositionResult::king_capture(BLUE_GREEN);
 
@@ -164,7 +169,7 @@ enum class KingLayout : std::uint8_t {
     }
 
     if (!legal_move_exists) {
-        if (in_check(position)) {
+        if (checked) {
             return PositionResult::checkmate(
               opposing_team_for_result(
                 team_of(position.side_to_move())));
@@ -177,6 +182,25 @@ enum class KingLayout : std::uint8_t {
         return PositionResult::threefold_repetition();
 
     return {};
+}
+
+[[nodiscard]] constexpr PositionResult classify_result(
+  const Position& position,
+  const PositionHistory& history,
+  bool legal_move_exists) noexcept {
+    assert(history.current_key() == position.key());
+
+    const KingLayout layout = king_layout(position);
+    const bool checked =
+      layout == KingLayout::COMPLETE
+      && !legal_move_exists
+      && in_check(position);
+    return classify_result_with_facts(
+      position,
+      history,
+      layout,
+      legal_move_exists,
+      checked);
 }
 
 }  // namespace Detail

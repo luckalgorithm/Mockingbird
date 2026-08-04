@@ -167,6 +167,81 @@ constexpr void replace_promotion_with_pawn(
 
 }  // namespace Detail
 
+// Returns whether applying a generated pseudo-legal move changes state that
+// cannot be restored by a later sequence of reversible moves. Such a move is
+// a safe boundary for repetition history retained by the protocol root.
+[[nodiscard]] constexpr bool is_repetition_irreversible(
+  const Position& position,
+  Move move) noexcept {
+    assert(is_ok(move));
+
+    const Square from = move.from();
+    const Square to = move.to();
+    assert(!position.empty(from));
+
+    const Piece moving_piece =
+      position.piece_on(from);
+    const Color moving_color =
+      position.side_to_move();
+    assert(color_of(moving_piece) == moving_color);
+
+    if (type_of(moving_piece) == PAWN
+        || move.type() == MoveType::EN_PASSANT
+        || !position.empty(to)) {
+        return true;
+    }
+
+    std::uint8_t rights_to_clear =
+      static_cast<std::uint8_t>(
+        Detail::CASTLING_RIGHTS_BY_SQUARE[std::size_t(from)]
+        | Detail::CASTLING_RIGHTS_BY_SQUARE[std::size_t(to)]);
+    if (type_of(moving_piece) == KING) {
+        rights_to_clear =
+          static_cast<std::uint8_t>(
+            rights_to_clear
+            | Detail::color_castling_rights(
+                moving_color));
+    }
+
+    for (int color_index = 0;
+         color_index < COLOR_NB;
+         ++color_index) {
+        const Color color = Color(color_index);
+        for (std::size_t side_index = 0;
+             side_index < CASTLING_SIDE_NB;
+             ++side_index) {
+            const CastlingSide side =
+              static_cast<CastlingSide>(side_index);
+            if (position.has_castling_right(color, side)
+                && (rights_to_clear
+                    & Detail::castling_right_bit(
+                        color, side)) != 0) {
+                return true;
+            }
+        }
+    }
+
+    for (int owner_index = 0;
+         owner_index < COLOR_NB;
+         ++owner_index) {
+        const Color owner = Color(owner_index);
+        const Square target =
+          position.en_passant_square(owner);
+        if (target == SQ_NONE)
+            continue;
+
+        const Square victim_square =
+          target + pawn_push(owner);
+        if (owner == moving_color
+            || from == victim_square
+            || to == victim_square) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
 // Applies a generated pseudo-legal move and advances to the next color.
 // Castling must satisfy the legality checks used by generate_castling_moves().
 // Preconditions: move belongs to the side to move, and undo is not the state
